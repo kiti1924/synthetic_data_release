@@ -188,8 +188,8 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
         from mpi4py import MPI
         if MPI.COMM_WORLD.Get_size() > 1:
             use_mpi = True
-    except ImportError:
-        pass
+    except (ImportError, RuntimeError):
+        use_mpi = False
 
     if use_mpi:
         from mpi4py import MPI

@@ -67,8 +67,9 @@ class EvaluationEngine:
                 from mpi4py import MPI
                 if MPI.COMM_WORLD.Get_rank() > 0:
                     self.is_worker = True
-            except ImportError:
-                pass
+            except (ImportError, RuntimeError) as e:
+                LOGGER.warning(f"Failed to load MPI: {e}. Falling back to standard parallelization.")
+                os.environ['USE_MPI'] = '0'
 
         # Load runconfig
         with open(path.join(cwd, self.args.runconfig)) as f:
@@ -96,7 +97,7 @@ class EvaluationEngine:
                 os.makedirs(self.cache_dir, exist_ok=True)
             if MPI.COMM_WORLD.Get_size() > 1:
                 MPI.COMM_WORLD.barrier()
-        except ImportError:
+        except (ImportError, RuntimeError):
             os.makedirs(self.args.outdir, exist_ok=True)
             os.makedirs(self.cache_dir, exist_ok=True)
 
@@ -180,7 +181,7 @@ class EvaluationEngine:
             from mpi4py import MPI
             if MPI.COMM_WORLD.Get_rank() != 0:
                 return
-        except ImportError:
+        except (ImportError, RuntimeError):
             pass
             
         outfile = f"{prefix}_{self.dname}"
@@ -194,7 +195,7 @@ class EvaluationEngine:
             try:
                 from mpi4py import MPI
                 return MPI.COMM_WORLD.bcast(data, root=0)
-            except ImportError:
+            except (ImportError, RuntimeError):
                 return data
         return data
 
