@@ -31,6 +31,7 @@ class EvaluationEngine:
         self.parser.add_argument('--outdir', '-O', default='outputs/test', type=str, help='Path relative to cwd for storing output files')
         self.parser.add_argument('--workers', '-W', type=int, default=None, help='Number of parallel workers (default: CPU count)')
         self.parser.add_argument('--device', type=str, default=None, help='Device to use for models (e.g., "cpu", "cuda:0"). Defaults to GPU if available, otherwise CPU.')
+        self.parser.add_argument('--use-mpi', action='store_true', help='Use MPI for distributing tasks across multiple nodes.')
         
         self.args = None
         self.runconfig = None
@@ -58,6 +59,10 @@ class EvaluationEngine:
             elif self.args.device == 'cpu':
                 os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
+        if getattr(self.args, 'use_mpi', False):
+            os.environ['USE_MPI'] = '1'
+            LOGGER.info("MPI execution enabled. Tasks will be distributed via mpi4py.futures.")
+
         # Load runconfig
         with open(path.join(cwd, self.args.runconfig)) as f:
             self.runconfig = json.load(f)
@@ -75,8 +80,18 @@ class EvaluationEngine:
         print(f'Loaded data {self.dname}:')
         print(self.rawPop.info())
 
-        # Make sure outdir exists
-        os.makedirs(self.args.outdir, exist_ok=True)
+        self.cache_dir = path.join(self.args.outdir, "cache")
+        # Make sure outdir and cache_dir exist
+        try:
+            from mpi4py import MPI
+            if MPI.COMM_WORLD.Get_rank() == 0:
+                os.makedirs(self.args.outdir, exist_ok=True)
+                os.makedirs(self.cache_dir, exist_ok=True)
+            if MPI.COMM_WORLD.Get_size() > 1:
+                MPI.COMM_WORLD.barrier()
+        except ImportError:
+            os.makedirs(self.args.outdir, exist_ok=True)
+            os.makedirs(self.cache_dir, exist_ok=True)
 
         seed(SEED)
 
@@ -94,6 +109,19 @@ class EvaluationEngine:
         self.gm_configs = [cfg for cfg in self.all_model_configs if is_generative_model_config(cfg)]
         self.san_configs = [cfg for cfg in self.all_model_configs if not is_generative_model_config(cfg)]
 
+    def _generate_cache_keys(self, tasks, iter_idx, desc_prefix):
+        import hashlib
+        keys = []
+        for task in tasks:
+            model_config = task[0]
+            config_str = str(model_config).encode('utf-8')
+            config_hash = hashlib.md5(config_str).hexdigest()[:8]
+            safe_name = str(model_config[0]).replace('/', '_').replace(' ', '_')
+            ds_hash = hashlib.md5(self.dname.encode('utf-8')).hexdigest()[:4]
+            key = f"{desc_prefix}_{safe_name}_{config_hash}_{ds_hash}_iter{iter_idx}.pkl"
+            keys.append(key)
+        return keys
+
     def run_parallel_evaluation(self, eval_gm_worker, san_tasks, gm_tasks, eval_san_worker=None, iter_idx=None, desc_prefix="eval"):
         # Helper to execute worker distribution efficiently across GPU and CPU boundaries.
         all_results = []
@@ -105,9 +133,10 @@ class EvaluationEngine:
         # 1. Evaluate sanitisers (CPU only, optimally parallel)
         if san_tasks:
             san_workers = get_optimal_workers_for_config(san_tasks[0][0], self.args.workers)
+            san_keys = self._generate_cache_keys(san_tasks, iter_idx, f"San_{desc_prefix}")
             all_results.extend(run_parallel_models(
                 eval_san_worker, san_tasks, max_workers=san_workers,
-                desc=f"San {desc_prefix}{suffix}"))
+                desc=f"San {desc_prefix}{suffix}", cache_keys=san_keys, cache_dir=self.cache_dir))
                 
         if gm_tasks:
             if _gpu_device_requested():
@@ -117,26 +146,36 @@ class EvaluationEngine:
     
                 # GPU models must serialize unless managed internally or over sub-devices
                 if gpu_gm_tasks:
+                    gpu_keys = self._generate_cache_keys(gpu_gm_tasks, iter_idx, f"GPU_{desc_prefix}")
                     all_results.extend(run_parallel_models(
                         eval_gm_worker, gpu_gm_tasks, max_workers=1,
-                        desc=f"GPU GM {desc_prefix}{suffix}"))
+                        desc=f"GPU GM {desc_prefix}{suffix}", cache_keys=gpu_keys, cache_dir=self.cache_dir))
                 
                 # CPU-only models can parallelize
                 if cpu_gm_tasks:
                     cpu_workers = get_optimal_workers_for_config(cpu_gm_tasks[0][0], self.args.workers)
+                    cpu_keys = self._generate_cache_keys(cpu_gm_tasks, iter_idx, f"CPU_{desc_prefix}")
                     all_results.extend(run_parallel_models(
                         eval_gm_worker, cpu_gm_tasks, max_workers=cpu_workers,
-                        desc=f"CPU GM {desc_prefix}{suffix}"))
+                        desc=f"CPU GM {desc_prefix}{suffix}", cache_keys=cpu_keys, cache_dir=self.cache_dir))
             else:
                 # If CPU is used, all models can be parallelized based on worker count
                 cpu_workers = get_optimal_workers_for_config(gm_tasks[0][0], self.args.workers)
+                gm_keys = self._generate_cache_keys(gm_tasks, iter_idx, f"GM_{desc_prefix}")
                 all_results.extend(run_parallel_models(
                     eval_gm_worker, gm_tasks, max_workers=cpu_workers,
-                    desc=f"GM Models {desc_prefix}{suffix}"))
+                    desc=f"GM Models {desc_prefix}{suffix}", cache_keys=gm_keys, cache_dir=self.cache_dir))
                     
         return all_results
 
     def dump_results(self, result_dict, prefix="Results"):
+        try:
+            from mpi4py import MPI
+            if MPI.COMM_WORLD.Get_rank() != 0:
+                return
+        except ImportError:
+            pass
+            
         outfile = f"{prefix}_{self.dname}"
         LOGGER.info(f"Write results to {path.join(self.args.outdir, outfile)}")
         with open(path.join(self.args.outdir, f'{outfile}.json'), 'w') as f:

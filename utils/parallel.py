@@ -6,6 +6,7 @@ from multiprocessing import cpu_count
 import joblib
 from numpy.random import seed
 from tqdm import tqdm
+from utils.logging import LOGGER
 
 from generative_models.generative_model import GenerativeModel
 
@@ -142,7 +143,33 @@ def _gpu_device_requested():
     return bool(device) and ('cuda' in device.lower() or device.lower().startswith('gpu'))
 
 
-def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models"):
+import pickle
+
+def _cached_worker_fn(worker_fn, task, cache_path):
+    if cache_path and os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'rb') as f:
+                res = pickle.load(f)
+            LOGGER.info(f"Loaded cached result from {os.path.basename(cache_path)}")
+            return res
+        except Exception as e:
+            LOGGER.warning(f"Failed to load cache {cache_path}: {e}. Recomputing.")
+    
+    res = worker_fn(*task)
+    
+    if cache_path:
+        try:
+            # Atomic save to prevent corruption
+            tmp_path = cache_path + ".tmp"
+            with open(tmp_path, 'wb') as f:
+                pickle.dump(res, f)
+            os.replace(tmp_path, cache_path)
+        except Exception as e:
+            LOGGER.warning(f"Failed to save cache {cache_path}: {e}")
+            
+    return res
+
+def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache_keys=None, cache_dir=None):
     """Run tasks in parallel using multiprocessing.Pool with tqdm progress bar.
 
     :param worker_fn: callable: Worker function to execute
@@ -156,20 +183,69 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models"):
     """
     if not tasks:
         return []
-    if max_workers == 1:
-        return [worker_fn(*task) for task in tqdm(tasks, desc=desc)]
-    if max_workers is None:
+
+    use_mpi = os.environ.get('USE_MPI', '0') == '1'
+
+    if max_workers == 1 and not use_mpi:
+        return [
+            _cached_worker_fn(worker_fn, task, os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None)
+            for i, task in tqdm(enumerate(tasks), total=len(tasks), desc=desc)
+        ]
+    if max_workers is None and not use_mpi:
         has_gpu_tasks = any(model_requires_gpu(task[0]) for task in tasks if task and isinstance(task[0], (tuple, list, str)))
         if _gpu_device_requested() and has_gpu_tasks:
             max_workers = 1
         else:
             max_workers = min(cpu_count(), len(tasks))
 
+    try:
+        from mpi4py import MPI
+        if MPI.COMM_WORLD.Get_size() > 1:
+            use_mpi = True
+    except ImportError:
+        pass
+
+    if use_mpi:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+
+        # SPMD Model: Partition tasks among ranks
+        my_tasks = [task for i, task in enumerate(tasks) if i % size == rank]
+        my_cache_paths = [
+            os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None 
+            for i in range(len(tasks)) if i % size == rank
+        ]
+        
+        my_results = []
+        for task, c_path in tqdm(zip(my_tasks, my_cache_paths), total=len(my_tasks), desc=f"{desc} (Rank {rank})", position=rank):
+            my_results.append(_cached_worker_fn(worker_fn, task, c_path))
+            
+        LOGGER.info(f"Node (Rank {rank}) finished processing {len(my_tasks)} tasks.")
+            
+        # Gather results to Rank 0
+        gathered = comm.gather(my_results, root=0)
+        
+        if rank == 0:
+            # Reconstruct original results list order
+            results = [None] * len(tasks)
+            for r in range(size):
+                if gathered[r] is None:
+                    continue
+                for i, res in enumerate(gathered[r]):
+                    orig_idx = r + i * size
+                    results[orig_idx] = res
+            return results
+        else:
+            return []
+
     # Use joblib.Parallel instead of multiprocessing.Pool
     # Loky backend automatically uses memmapping for arrays > 1MB, solving the IPC bottleneck
     with tqdm(total=len(tasks), desc=desc) as pbar:
         results = joblib.Parallel(n_jobs=max_workers, backend='loky')(
-            joblib.delayed(worker_fn)(*task) for task in tasks
+            joblib.delayed(_cached_worker_fn)(worker_fn, task, os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None) 
+            for i, task in enumerate(tasks)
         )
         pbar.update(len(results))
             
