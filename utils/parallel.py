@@ -91,9 +91,8 @@ def model_requires_gpu(config):
 def get_optimal_workers_for_config(config, user_workers=None):
     """Get optimal number of workers for a specific config.
     
-    If the model uses PyTorch/TF (GPU_MODELS), force 1 worker to avoid 
-    multiprocessing deadlocks and OpenMP/Accelerate thrashing on CPU, 
-    or CUDA context fragmentation on GPU.
+    If the model uses PyTorch/TF (GPU_MODELS) and a GPU is requested, force 1 worker to avoid 
+    CUDA context fragmentation on GPU.
     Otherwise, use optimal parallel count.
     
     :param config: Model/sanitiser config tuple
@@ -103,10 +102,10 @@ def get_optimal_workers_for_config(config, user_workers=None):
     if user_workers == 1:
         return 1
     
-    if model_requires_gpu(config):
-        return 1  # Deep learning model: serialize to avoid parallel threading contention
+    if model_requires_gpu(config) and _gpu_device_requested():
+        return 1  # Deep learning model running on GPU: serialize to avoid CUDA context fragmentation
     
-    # Standard CPU models (e.g. Scikit-learn, pgx, etc)
+    # Standard CPU models (e.g. Scikit-learn, pgx, etc) or Deep Learning models on CPU
 
     if user_workers is None:
         return min(cpu_count(), 4)  # Reasonable default for CPU tasks

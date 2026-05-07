@@ -14,6 +14,7 @@ from utils.parallel import (
     model_requires_gpu,
     get_optimal_workers_for_config,
     run_parallel_models,
+    _gpu_device_requested,
 )
 
 SEED = 42
@@ -109,22 +110,29 @@ class EvaluationEngine:
                 desc=f"San {desc_prefix}{suffix}"))
                 
         if gm_tasks:
-            # Separate GPU-requiring models from CPU-only models for optimal parallelization
-            gpu_gm_tasks = [t for t in gm_tasks if model_requires_gpu(t[0])]
-            cpu_gm_tasks = [t for t in gm_tasks if not model_requires_gpu(t[0])]
-
-            # GPU models must serialize unless managed internally or over sub-devices
-            if gpu_gm_tasks:
+            if _gpu_device_requested():
+                # Separate GPU-requiring models from CPU-only models for optimal parallelization
+                gpu_gm_tasks = [t for t in gm_tasks if model_requires_gpu(t[0])]
+                cpu_gm_tasks = [t for t in gm_tasks if not model_requires_gpu(t[0])]
+    
+                # GPU models must serialize unless managed internally or over sub-devices
+                if gpu_gm_tasks:
+                    all_results.extend(run_parallel_models(
+                        eval_gm_worker, gpu_gm_tasks, max_workers=1,
+                        desc=f"GPU GM {desc_prefix}{suffix}"))
+                
+                # CPU-only models can parallelize
+                if cpu_gm_tasks:
+                    cpu_workers = get_optimal_workers_for_config(cpu_gm_tasks[0][0], self.args.workers)
+                    all_results.extend(run_parallel_models(
+                        eval_gm_worker, cpu_gm_tasks, max_workers=cpu_workers,
+                        desc=f"CPU GM {desc_prefix}{suffix}"))
+            else:
+                # If CPU is used, all models can be parallelized based on worker count
+                cpu_workers = get_optimal_workers_for_config(gm_tasks[0][0], self.args.workers)
                 all_results.extend(run_parallel_models(
-                    eval_gm_worker, gpu_gm_tasks, max_workers=1,
-                    desc=f"GPU GM {desc_prefix}{suffix}"))
-            
-            # CPU-only models can parallelize
-            if cpu_gm_tasks:
-                cpu_workers = get_optimal_workers_for_config(cpu_gm_tasks[0][0], self.args.workers)
-                all_results.extend(run_parallel_models(
-                    eval_gm_worker, cpu_gm_tasks, max_workers=cpu_workers,
-                    desc=f"CPU GM {desc_prefix}{suffix}"))
+                    eval_gm_worker, gm_tasks, max_workers=cpu_workers,
+                    desc=f"GM Models {desc_prefix}{suffix}"))
                     
         return all_results
 
