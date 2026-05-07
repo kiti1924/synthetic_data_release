@@ -3,7 +3,7 @@ name = "synthetic-data-release"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "autodp>=0.2.3.1",
     "category-encoders>=2.9.0",
@@ -46,6 +46,6 @@ url = "https://pypi.nvidia.com"
 explicit = true
 
 [tool.uv.sources]
-k-anonymization = { git = "https://github.com/SDC4Society/k_anonymization.git" }
+k-anonymization = { git = "https://github.com/SDC4Society/k_anonymization.git", branch = "compatibility/python-3.11" }
 cuml-cu12 = { index = "nvidia" }
 cudf-cu12 = { index = "nvidia" }

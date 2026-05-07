@@ -1,3 +1,4 @@
+.venv
 venv*
 .idea/*
 spring_synthetic_data.iml
@@ -42,3 +43,5 @@ debug_imports.txt
 # Scratch/temp files
 scratch.py
 scratch/
+
+test.sh
