@@ -57,24 +57,12 @@ def create_model(config, metadata):
 
 
 def model_name_from_config(config, metadata=None):
-    """Return a model name for a config, falling back when the model cannot be imported."""
-    original_device = os.environ.get('SYNTHETIC_DATA_DEVICE')
-    try:
-        os.environ['SYNTHETIC_DATA_DEVICE'] = 'cpu'
-        os.environ.setdefault('CUDA_VISIBLE_DEVICES', '')
-        model = create_model(config, metadata)
-        return model.__name__
-    except (ModuleNotFoundError, ImportError, RuntimeError, ValueError):
-        name, *params = config
-        if params:
-            param_str = ','.join(str(p) for p in params)
-            return f'{name}({param_str})'
-        return name
-    finally:
-        if original_device is None:
-            os.environ.pop('SYNTHETIC_DATA_DEVICE', None)
-        else:
-            os.environ['SYNTHETIC_DATA_DEVICE'] = original_device
+    """Return a model name for a config without instantiating it."""
+    name, *params = config if isinstance(config, (tuple, list)) else (config,)
+    if params:
+        param_str = ','.join(str(p) for p in params)
+        return f'{name}({param_str})'
+    return name
 
 
 def is_generative_model_config(config):
@@ -126,9 +114,7 @@ def is_generative_model(model):
     return isinstance(model, GenerativeModel)
 
 
-def _worker_init():
-    """Initialize worker process with a unique random seed."""
-    seed(os.getpid())
+
 
 
 class _StarmapHelper:
@@ -159,8 +145,8 @@ def _cached_worker_fn(worker_fn, task, cache_path):
     
     if cache_path:
         try:
-            # Atomic save to prevent corruption
-            tmp_path = cache_path + ".tmp"
+            # Atomic save to prevent corruption, using PID to avoid process collisions
+            tmp_path = f"{cache_path}.tmp.{os.getpid()}"
             with open(tmp_path, 'wb') as f:
                 pickle.dump(res, f)
             os.replace(tmp_path, cache_path)
@@ -219,25 +205,42 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
         ]
         
         my_results = []
-        for task, c_path in tqdm(zip(my_tasks, my_cache_paths), total=len(my_tasks), desc=f"{desc} (Rank {rank})", position=rank):
+        disable_tqdm = (rank != 0)
+        for task, c_path in tqdm(zip(my_tasks, my_cache_paths), total=len(my_tasks), desc=f"{desc}", disable=disable_tqdm):
             my_results.append(_cached_worker_fn(worker_fn, task, c_path))
             
         LOGGER.info(f"Node (Rank {rank}) finished processing {len(my_tasks)} tasks.")
             
-        # Gather results to Rank 0
-        gathered = comm.gather(my_results, root=0)
+        # Scalable Gather: Each rank writes results to a temp file, Rank 0 reads and combines them
+        rank_file = os.path.join(cache_dir, f".tmp_results_rank_{rank}_{os.getpid()}.pkl")
+        with open(rank_file, 'wb') as f:
+            pickle.dump(my_results, f)
+            
+        comm.barrier()
         
         if rank == 0:
             # Reconstruct original results list order
             results = [None] * len(tasks)
-            for r in range(size):
-                if gathered[r] is None:
-                    continue
-                for i, res in enumerate(gathered[r]):
-                    orig_idx = r + i * size
-                    results[orig_idx] = res
+            # Gather all file paths from ranks via MPI string gather to support arbitrary PIDs
+            all_rank_files = comm.gather(rank_file, root=0)
+            
+            for r, rf in enumerate(all_rank_files):
+                if rf and os.path.exists(rf):
+                    with open(rf, 'rb') as f:
+                        r_results = pickle.load(f)
+                    
+                    for i, res in enumerate(r_results):
+                        orig_idx = r + i * size
+                        if orig_idx < len(tasks):
+                            results[orig_idx] = res
+                    
+                    try:
+                        os.remove(rf)
+                    except OSError:
+                        pass
             return results
         else:
+            comm.gather(rank_file, root=0)
             return []
 
     # Use joblib.Parallel instead of multiprocessing.Pool

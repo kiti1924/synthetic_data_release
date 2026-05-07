@@ -38,6 +38,7 @@ class EvaluationEngine:
         self.rawPop = None
         self.metadata = None
         self.dname = None
+        self.is_worker = False
         
         self.all_model_configs = []
         self.gm_configs = []
@@ -62,6 +63,12 @@ class EvaluationEngine:
         if getattr(self.args, 'use_mpi', False):
             os.environ['USE_MPI'] = '1'
             LOGGER.info("MPI execution enabled. Tasks will be distributed via mpi4py.futures.")
+            try:
+                from mpi4py import MPI
+                if MPI.COMM_WORLD.Get_rank() > 0:
+                    self.is_worker = True
+            except ImportError:
+                pass
 
         # Load runconfig
         with open(path.join(cwd, self.args.runconfig)) as f:
@@ -180,6 +187,16 @@ class EvaluationEngine:
         LOGGER.info(f"Write results to {path.join(self.args.outdir, outfile)}")
         with open(path.join(self.args.outdir, f'{outfile}.json'), 'w') as f:
             json.dump(result_dict, f, indent=2, default=json_numpy_serialzer)
+
+    def bcast_data(self, data):
+        """Broadcast data from Rank 0 to all other ranks."""
+        if getattr(self.args, 'use_mpi', False):
+            try:
+                from mpi4py import MPI
+                return MPI.COMM_WORLD.bcast(data, root=0)
+            except ImportError:
+                return data
+        return data
 
 
 def get_accuracy(guesses, labels, targetPresence):

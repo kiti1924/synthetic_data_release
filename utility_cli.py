@@ -252,46 +252,19 @@ def main():
         ###############
         ## RAW EVALUATION (keep serial - small computation)
         ###############
-        LOGGER.info('Start: Utility evaluation on Raw...')
-
-        for ut_cfg in utility_task_configs:
-            ut = create_utility_task(ut_cfg, metadata)
-            ut.set_seed(SEED)
-
-            resultsTargetUtility[ut.__name__]['Raw'][nr] = {}
-
-            predErrorTargets = []
-            predErrorAggr = []
-            for _ in range(runconfig['nSynT']):
-                ut.train(rawTout)
-                predErrorTargets.append(ut.evaluate(testRecords))
-                predErrorAggr.append(ut.evaluate(rawTest))
-
-            _arr_targets = np.array(predErrorTargets, dtype=float)
-            _arr_aggr = np.array(predErrorAggr, dtype=float)
-            _failures_targets = int(np.isnan(_arr_targets).all(axis=1).sum()) if _arr_targets.ndim == 2 else int(np.isnan(_arr_targets).sum())
-            _failures_aggr = int(np.isnan(_arr_aggr).sum())
-            resultsTargetUtility[ut.__name__]['Raw'][nr]['OUT'] = {
-                'TestRecordID': testRecordIDs,
-                'Accuracy': list(mean(_arr_targets, axis=0)),
-                'Failures': _failures_targets
-            }
-            resultsAggUtility[ut.__name__]['Raw']['TargetID'].append('OUT')
-            resultsAggUtility[ut.__name__]['Raw']['Accuracy'].append(mean(_arr_aggr))
-            resultsAggUtility[ut.__name__]['Raw']['Failures'].append(_failures_aggr)
-
-        for tid in targetIDs:
-            target = targets.loc[[tid]]
-            rawIn = pd.concat([rawTout, target])
+        if not engine.is_worker:
+            LOGGER.info('Start: Utility evaluation on Raw...')
 
             for ut_cfg in utility_task_configs:
                 ut = create_utility_task(ut_cfg, metadata)
                 ut.set_seed(SEED)
 
+                resultsTargetUtility[ut.__name__]['Raw'][nr] = {}
+
                 predErrorTargets = []
                 predErrorAggr = []
                 for _ in range(runconfig['nSynT']):
-                    ut.train(rawIn)
+                    ut.train(rawTout)
                     predErrorTargets.append(ut.evaluate(testRecords))
                     predErrorAggr.append(ut.evaluate(rawTest))
 
@@ -299,16 +272,44 @@ def main():
                 _arr_aggr = np.array(predErrorAggr, dtype=float)
                 _failures_targets = int(np.isnan(_arr_targets).all(axis=1).sum()) if _arr_targets.ndim == 2 else int(np.isnan(_arr_targets).sum())
                 _failures_aggr = int(np.isnan(_arr_aggr).sum())
-                resultsTargetUtility[ut.__name__]['Raw'][nr][tid] = {
+                resultsTargetUtility[ut.__name__]['Raw'][nr]['OUT'] = {
                     'TestRecordID': testRecordIDs,
                     'Accuracy': list(mean(_arr_targets, axis=0)),
                     'Failures': _failures_targets
                 }
-                resultsAggUtility[ut.__name__]['Raw']['TargetID'].append(tid)
+                resultsAggUtility[ut.__name__]['Raw']['TargetID'].append('OUT')
                 resultsAggUtility[ut.__name__]['Raw']['Accuracy'].append(mean(_arr_aggr))
                 resultsAggUtility[ut.__name__]['Raw']['Failures'].append(_failures_aggr)
 
-        LOGGER.info('Finished: Utility evaluation on Raw.')
+            for tid in targetIDs:
+                target = targets.loc[[tid]]
+                rawIn = pd.concat([rawTout, target])
+
+                for ut_cfg in utility_task_configs:
+                    ut = create_utility_task(ut_cfg, metadata)
+                    ut.set_seed(SEED)
+
+                    predErrorTargets = []
+                    predErrorAggr = []
+                    for _ in range(runconfig['nSynT']):
+                        ut.train(rawIn)
+                        predErrorTargets.append(ut.evaluate(testRecords))
+                        predErrorAggr.append(ut.evaluate(rawTest))
+
+                    _arr_targets = np.array(predErrorTargets, dtype=float)
+                    _arr_aggr = np.array(predErrorAggr, dtype=float)
+                    _failures_targets = int(np.isnan(_arr_targets).all(axis=1).sum()) if _arr_targets.ndim == 2 else int(np.isnan(_arr_targets).sum())
+                    _failures_aggr = int(np.isnan(_arr_aggr).sum())
+                    resultsTargetUtility[ut.__name__]['Raw'][nr][tid] = {
+                        'TestRecordID': testRecordIDs,
+                        'Accuracy': list(mean(_arr_targets, axis=0)),
+                        'Failures': _failures_targets
+                    }
+                    resultsAggUtility[ut.__name__]['Raw']['TargetID'].append(tid)
+                    resultsAggUtility[ut.__name__]['Raw']['Accuracy'].append(mean(_arr_aggr))
+                    resultsAggUtility[ut.__name__]['Raw']['Failures'].append(_failures_aggr)
+
+            LOGGER.info('Finished: Utility evaluation on Raw.')
 
         ###############
         ## PARALLEL MODEL EVALUATION

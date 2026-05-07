@@ -197,6 +197,8 @@ def main():
         desc_prefix="attack training"
     )
 
+    attack_results = engine.bcast_data(attack_results)
+
     attacks = {}
     cfg_to_model_name = {}
     for tid, model_name, trained, cfg_key in attack_results:

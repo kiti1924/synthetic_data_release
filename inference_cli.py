@@ -207,44 +207,45 @@ def main():
         ###############
         ## RAW ATTACKS (keep serial - small computation)
         ###############
-        attacks = {}
-        for sa, atype in runconfig['sensitiveAttributes'].items():
-            if atype == 'LinReg':
-                attacks[sa] = LinRegAttack(sensitiveAttribute=sa, metadata=metadata)
-            elif atype == 'Classification':
-                attacks[sa] = RandForestAttack(sensitiveAttribute=sa, metadata=metadata)
-
-        for sa, Attack in attacks.items():
-            Attack.train(rawTout)
-            for tid in targetIDs:
-                target = targets.loc[[tid]]
-                targetAux = target.loc[[tid], Attack.knownAttributes]
-                targetSecret = target.loc[tid, Attack.sensitiveAttribute]
-
-                guess = Attack.attack(targetAux, attemptLinkage=True, data=rawTout)
-                pCorrect = Attack.get_likelihood(targetAux, targetSecret, attemptLinkage=True, data=rawTout)
-
-                resultsTargetPrivacy[tid][sa]['Raw'][nr] = {
-                    'AttackerGuess': [guess],
-                    'ProbCorrect': [pCorrect],
-                    'TargetPresence': [LABEL_OUT]
-                }
-
-        for tid in targetIDs:
-            target = targets.loc[[tid]]
-            rawTin = pd.concat([rawTout, target])
+        if not engine.is_worker:
+            attacks = {}
+            for sa, atype in runconfig['sensitiveAttributes'].items():
+                if atype == 'LinReg':
+                    attacks[sa] = LinRegAttack(sensitiveAttribute=sa, metadata=metadata)
+                elif atype == 'Classification':
+                    attacks[sa] = RandForestAttack(sensitiveAttribute=sa, metadata=metadata)
 
             for sa, Attack in attacks.items():
-                Attack.train(rawTin)
-                targetAux = target.loc[[tid], Attack.knownAttributes]
-                targetSecret = target.loc[tid, Attack.sensitiveAttribute]
+                Attack.train(rawTout)
+                for tid in targetIDs:
+                    target = targets.loc[[tid]]
+                    targetAux = target.loc[[tid], Attack.knownAttributes]
+                    targetSecret = target.loc[tid, Attack.sensitiveAttribute]
 
-                guess = Attack.attack(targetAux, attemptLinkage=True, data=rawTin)
-                pCorrect = Attack.get_likelihood(targetAux, targetSecret, attemptLinkage=True, data=rawTin)
+                    guess = Attack.attack(targetAux, attemptLinkage=True, data=rawTout)
+                    pCorrect = Attack.get_likelihood(targetAux, targetSecret, attemptLinkage=True, data=rawTout)
 
-                resultsTargetPrivacy[tid][sa]['Raw'][nr]['AttackerGuess'].append(guess)
-                resultsTargetPrivacy[tid][sa]['Raw'][nr]['ProbCorrect'].append(pCorrect)
-                resultsTargetPrivacy[tid][sa]['Raw'][nr]['TargetPresence'].append(LABEL_IN)
+                    resultsTargetPrivacy[tid][sa]['Raw'][nr] = {
+                        'AttackerGuess': [guess],
+                        'ProbCorrect': [pCorrect],
+                        'TargetPresence': [LABEL_OUT]
+                    }
+
+            for tid in targetIDs:
+                target = targets.loc[[tid]]
+                rawTin = pd.concat([rawTout, target])
+
+                for sa, Attack in attacks.items():
+                    Attack.train(rawTin)
+                    targetAux = target.loc[[tid], Attack.knownAttributes]
+                    targetSecret = target.loc[tid, Attack.sensitiveAttribute]
+
+                    guess = Attack.attack(targetAux, attemptLinkage=True, data=rawTin)
+                    pCorrect = Attack.get_likelihood(targetAux, targetSecret, attemptLinkage=True, data=rawTin)
+
+                    resultsTargetPrivacy[tid][sa]['Raw'][nr]['AttackerGuess'].append(guess)
+                    resultsTargetPrivacy[tid][sa]['Raw'][nr]['ProbCorrect'].append(pCorrect)
+                    resultsTargetPrivacy[tid][sa]['Raw'][nr]['TargetPresence'].append(LABEL_IN)
 
         ###############
         ## PARALLEL MODEL EVALUATION
