@@ -3,6 +3,9 @@ A practical framework to evaluate the privacy-utility tradeoff of synthetic data
 
 Based on "Stadler, T., Oprisanu, B., and Troncoso, C. (2022). In 31st USENIX Security Symposium (USENIX Security22), pages 1451–1468, Boston, MA. USENIX Association.", [official paper](https://www.usenix.org/conference/usenixsecurity22/presentation/stadler), [arXiv](https://arxiv.org/abs/2011.07018), [github](https://github.com/spring-epfl/synthetic_data_release)
 
+## Updates
+For details on the major updates made to this fork (including MPI distributed execution and Robust Execution Caching), please see [UPDATE.md](UPDATE.md).
+
 # Attack models
 The module `attack_models` so far includes
 

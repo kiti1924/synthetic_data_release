@@ -6,6 +6,9 @@
 - arXiv: https://arxiv.org/abs/2011.07018
 - GitHub: https://github.com/spring-epfl/synthetic_data_release
 
+## 更新履歴 (Updates)
+本フォークにおける主要な更新要素（MPI分散処理への対応、および堅牢な実行キャッシュ機構の導入など）の詳細については、[UPDATE_JP.md](UPDATE_JP.md) を参照してください。
+
 # 攻撃モデル
 `attack_models` モジュールには、現在次の攻撃モデルが含まれています。
 
