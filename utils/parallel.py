@@ -208,50 +208,83 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
         rank = comm.Get_rank()
         size = comm.Get_size()
 
-        # SPMD Model: Partition tasks among ranks
-        my_tasks = [task for i, task in enumerate(tasks) if i % size == rank]
-        my_cache_paths = [
-            os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None 
-            for i in range(len(tasks)) if i % size == rank
-        ]
-        
-        my_results = []
-        disable_tqdm = (rank != 0)
-        for task, c_path in tqdm(zip(my_tasks, my_cache_paths), total=len(my_tasks), desc=f"{desc}", disable=disable_tqdm):
-            my_results.append(_cached_worker_fn(worker_fn, task, c_path))
-            
-        LOGGER.info(f"Node (Rank {rank}) finished processing {len(my_tasks)} tasks.")
-            
-        # Scalable Gather: Each rank writes results to a temp file, Rank 0 reads and combines them
-        rank_file = os.path.join(cache_dir, f".tmp_results_rank_{rank}_{os.getpid()}.pkl")
-        with open(rank_file, 'wb') as f:
-            pickle.dump(my_results, f)
-            
-        comm.barrier()
-        
+        # Hierarchical Dynamic Queue (MPI + Joblib)
+        # Each rank processes tasks in parallel using joblib (intra-node)
+        # while MPI distributes work chunks across ranks (inter-node).
+        local_n_jobs = max_workers if max_workers is not None else 1
+
         if rank == 0:
-            # Reconstruct original results list order
             results = [None] * len(tasks)
-            # Gather all file paths from ranks via MPI string gather to support arbitrary PIDs
-            all_rank_files = comm.gather(rank_file, root=0)
+            next_task_idx = 0
+            active_workers = 0
             
-            for r, rf in enumerate(all_rank_files):
-                if rf and os.path.exists(rf):
-                    with open(rf, 'rb') as f:
-                        r_results = pickle.load(f)
+            # Use tqdm on Rank 0 to monitor progress
+            with tqdm(total=len(tasks), desc=desc) as pbar:
+                # Initial dispatch: send a chunk of tasks to each worker
+                for r in range(1, size):
+                    if next_task_idx < len(tasks):
+                        # Chunk size matches local worker count for efficiency
+                        chunk_size = min(local_n_jobs, len(tasks) - next_task_idx)
+                        chunk_indices = list(range(next_task_idx, next_task_idx + chunk_size))
+                        comm.send(chunk_indices, dest=r, tag=10)
+                        next_task_idx += chunk_size
+                        active_workers += 1
+                    else:
+                        comm.send(None, dest=r, tag=10)
+                
+                # If size=1, Rank 0 does all work locally using joblib
+                if size == 1:
+                    local_results = joblib.Parallel(n_jobs=local_n_jobs, backend='loky')(
+                        joblib.delayed(_cached_worker_fn)(
+                            worker_fn, tasks[i], 
+                            os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None
+                        ) for i in range(len(tasks))
+                    )
+                    pbar.update(len(tasks))
+                    return local_results
+
+                # Collect results and dispatch remaining chunks
+                while active_workers > 0:
+                    status = MPI.Status()
+                    result_bundle = comm.recv(source=MPI.ANY_SOURCE, tag=20, status=status)
+                    worker_rank = status.Get_source()
                     
-                    for i, res in enumerate(r_results):
-                        orig_idx = r + i * size
-                        if orig_idx < len(tasks):
-                            results[orig_idx] = res
+                    # result_bundle is a list of (idx, res) tuples
+                    for idx, res in result_bundle:
+                        results[idx] = res
+                        pbar.update(1)
                     
-                    try:
-                        os.remove(rf)
-                    except OSError:
-                        pass
+                    if next_task_idx < len(tasks):
+                        chunk_size = min(local_n_jobs, len(tasks) - next_task_idx)
+                        chunk_indices = list(range(next_task_idx, next_task_idx + chunk_size))
+                        comm.send(chunk_indices, dest=worker_rank, tag=10)
+                        next_task_idx += chunk_size
+                    else:
+                        comm.send(None, dest=worker_rank, tag=10)
+                        active_workers -= 1
+            
+            LOGGER.info(f"Master (Rank 0) finished collecting {len(tasks)} results.")
             return results
         else:
-            comm.gather(rank_file, root=0)
+            # Worker loop: process chunks using local multi-processing
+            while True:
+                task_indices = comm.recv(source=0, tag=10)
+                if task_indices is None:
+                    break
+                
+                # Execute chunk in parallel locally
+                # Loky backend is used for efficient memory sharing of DataFrames
+                chunk_results = joblib.Parallel(n_jobs=local_n_jobs, backend='loky')(
+                    joblib.delayed(lambda idx: (idx, _cached_worker_fn(
+                        worker_fn, tasks[idx], 
+                        os.path.join(cache_dir, cache_keys[idx]) if cache_keys and cache_dir else None
+                    )))(i) for i in task_indices
+                )
+                
+                # Send back the whole chunk of results
+                comm.send(chunk_results, dest=0, tag=20)
+            
+            LOGGER.info(f"Worker (Rank {rank}) finished all assigned chunks.")
             return []
 
     # Use joblib.Parallel instead of multiprocessing.Pool

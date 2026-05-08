@@ -179,7 +179,8 @@ def main():
     ###################################
     #### ATTACK TRAINING #############
     ##################################
-    print('\n---- Attack training ----')
+    if not engine.is_worker:
+        print('\n---- Attack training ----')
 
     attack_gm_tasks = [
         (cfg, tid, targets.loc[[tid]], rawA, metadata, runconfig)

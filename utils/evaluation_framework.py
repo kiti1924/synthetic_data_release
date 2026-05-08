@@ -74,8 +74,9 @@ class EvaluationEngine:
         # Load runconfig
         with open(path.join(cwd, self.args.runconfig)) as f:
             self.runconfig = json.load(f)
-        print('Runconfig:')
-        print(self.runconfig)
+        if not self.is_worker:
+            print('Runconfig:')
+            print(self.runconfig)
 
         # Load data
         if self.args.s3name is not None:
@@ -85,8 +86,9 @@ class EvaluationEngine:
             self.rawPop, self.metadata = load_local_data_as_df(path.join(cwd, self.args.datapath))
             self.dname = self.args.datapath.split('/')[-1]
 
-        print(f'Loaded data {self.dname}:')
-        print(self.rawPop.info())
+        if not self.is_worker:
+            print(f'Loaded data {self.dname}:')
+            print(self.rawPop.info())
 
         self.cache_dir = path.join(self.args.outdir, "cache")
         # Make sure outdir and cache_dir exist

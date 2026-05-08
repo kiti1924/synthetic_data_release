@@ -63,6 +63,14 @@ def main():
     argparser.add_argument('--output', '-o', type=str,
                            help='Path where to write the json metadata file')
     args = argparser.parse_args()
+    
+    # MPI safety: only rank 0 should run this script to avoid write collisions
+    try:
+        from mpi4py import MPI
+        if MPI.COMM_WORLD.Get_rank() > 0:
+            return
+    except (ImportError, RuntimeError):
+        pass
 
     # Load the dataset
     logger.info(f'Loading the data from {args.dataset}')
