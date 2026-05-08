@@ -40,8 +40,6 @@ memo/
 import_log.txt
 debug_imports.txt
 
-# Scratch/temp files
-scratch.py
-scratch/
-
+# SPC/cache files
 test.sh
+cache

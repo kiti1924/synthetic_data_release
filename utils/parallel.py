@@ -173,10 +173,21 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
     use_mpi = os.environ.get('USE_MPI', '0') == '1'
 
     if max_workers == 1 and not use_mpi:
-        return [
-            _cached_worker_fn(worker_fn, task, os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None)
-            for i, task in tqdm(enumerate(tasks), total=len(tasks), desc=desc)
-        ]
+        import numpy as np
+        import random
+        # 逐次実行時（メインプロセス）にモデル内で乱数が消費・リセットされても、
+        # メインプロセスの乱数状態に影響を与えないように状態を退避・復元する。
+        # これによりキャッシュヒット時と通常実行時の後続の再現性を完全に一致させる。
+        np_state = np.random.get_state()
+        py_state = random.getstate()
+        try:
+            return [
+                _cached_worker_fn(worker_fn, task, os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None)
+                for i, task in tqdm(enumerate(tasks), total=len(tasks), desc=desc)
+            ]
+        finally:
+            np.random.set_state(np_state)
+            random.setstate(py_state)
     if max_workers is None and not use_mpi:
         has_gpu_tasks = any(model_requires_gpu(task[0]) for task in tasks if task and isinstance(task[0], (tuple, list, str)))
         if _gpu_device_requested() and has_gpu_tasks:
