@@ -14,7 +14,8 @@ import pandas as pd
 from utils.utils import json_numpy_serialzer
 from utils.logging import LOGGER
 from sklearn.model_selection import train_test_split
-from utils.parallel import create_model, create_utility_task
+from utils.parallel import (MODEL_REGISTRY, create_model, create_utility_task,
+                           get_syn_data_cache_path, load_syn_data, save_syn_data)
 from utils.evaluation_framework import EvaluationEngine
 
 def _deep_tuple(obj):
@@ -33,26 +34,36 @@ SEED = 42
 
 
 def utility_eval_gm_worker(iter_idx, model_config, rawTout, targets, targetIDs,
-                           utility_task_configs, testRecords, testRecordIDs,
-                           rawTest, metadata, runconfig):
-    """Evaluate one generative model's utility across all targets.
+                           utility_task_configs, testRecords, testRecordIDs, rawTest, 
+                           metadata, runconfig, dname, cache_dir):
+    """Evaluate one generative model across all utility tasks and iterations.
     :return: tuple: (iter_idx, model_name, results_target dict, results_agg dict)
     """
     try:
-        model = create_model(model_config, metadata)
-        model.set_seed(SEED)
+        nSynT = runconfig['nSynT']
+        sizeSynT = runconfig['sizeSynT']
+        
+        # Check cache for synthetic data WITHOUT target
+        syn_cache_path = get_syn_data_cache_path(cache_dir, model_config, dname, iter_idx, nSynT, sizeSynT)
+        synTwithoutTarget = load_syn_data(syn_cache_path)
+
+        if synTwithoutTarget is None:
+            model = create_model(model_config, metadata)
+            model.set_seed(SEED)
+            model.fit(rawTout)
+            synTwithoutTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
+            save_syn_data(syn_cache_path, synTwithoutTarget)
+        
+        model_name = model_config[0] # Fallback name
+
         utility_tasks = [create_utility_task(cfg, metadata) for cfg in utility_task_configs]
         for ut in utility_tasks:
             ut.set_seed(SEED)
-        nSynT = runconfig['nSynT']
-        sizeSynT = runconfig['sizeSynT']
 
         results_target = {}
         results_agg = {}
 
-        model.fit(rawTout)
-        synTwithoutTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
-
+        # 1. Evaluate on synthetic data WITHOUT target
         for ut in utility_tasks:
             predErrorTargets = []
             predErrorAggr = []
@@ -72,9 +83,15 @@ def utility_eval_gm_worker(iter_idx, model_config, rawTout, targets, targetIDs,
                 }
                 results_agg.setdefault(ut.__name__, []).append(('OUT', mean(_arr_a), int(np.isnan(_arr_a).sum())))
 
+        # 2. Evaluate on synthetic data WITH target (for each target)
         for tid in targetIDs:
+            # We don't cache "with target" data as it's too specific and numerous
             target = targets.loc[[tid]]
             rawTin = pd.concat([rawTout, target])
+            
+            # We need the model instance to fit and generate
+            model = create_model(model_config, metadata)
+            model.set_seed(SEED)
             model.fit(rawTin)
             synTwithTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
 
@@ -97,7 +114,7 @@ def utility_eval_gm_worker(iter_idx, model_config, rawTout, targets, targetIDs,
                     }
                     results_agg.setdefault(ut.__name__, []).append((tid, mean(_arr_a), int(np.isnan(_arr_a).sum())))
 
-        return (iter_idx, model.__name__, results_target, results_agg)
+        return (iter_idx, model_name, results_target, results_agg)
     except Exception as e:
         LOGGER.error(f"Utility evaluation failed for model {model_config[0]}: {e}")
         return (iter_idx, model_config[0], {}, {})
@@ -357,7 +374,8 @@ def main():
         rawTout = all_rawTout[nr]
         for cfg in engine.gm_configs:
             gm_tasks.append((nr, cfg, rawTout, targets, targetIDs,
-                            utility_task_configs, testRecords, testRecordIDs, rawTest, metadata, runconfig))
+                            utility_task_configs, testRecords, testRecordIDs, rawTest, 
+                            metadata, runconfig, dname, engine.cache_dir))
             gm_iter_idxs.append(nr)
         for cfg in engine.san_configs:
             san_tasks.append((nr, cfg, rawTout, targets, targetIDs,

@@ -13,7 +13,8 @@ import pandas as pd
 from utils.utils import json_numpy_serialzer
 from utils.logging import LOGGER
 from utils.constants import *
-from utils.parallel import create_model, is_generative_model, is_generative_model_config
+from utils.parallel import (create_model, is_generative_model, is_generative_model_config,
+                           get_syn_data_cache_path, load_syn_data, save_syn_data)
 from utils.evaluation_framework import EvaluationEngine
 
 from attack_models.reconstruction import LinRegAttack, RandForestAttack
@@ -35,15 +36,26 @@ SEED = 42
 
 
 def inference_eval_gm_worker(iter_idx, model_config, rawTout, targets, targetIDs,
-                             sensitive_attrs, metadata, runconfig):
+                             sensitive_attrs, metadata, runconfig, dname, cache_dir):
     """Evaluate one generative model for inference attack across all targets.
     :return: tuple: (iter_idx, model_name, {(tid, sa): result_dict})
     """
     try:
-        model = create_model(model_config, metadata)
-        model.set_seed(SEED)
         nSynT = runconfig['nSynT']
         sizeSynT = runconfig['sizeSynT']
+
+        # Check cache for synthetic data WITHOUT target
+        syn_cache_path = get_syn_data_cache_path(cache_dir, model_config, dname, iter_idx, nSynT, sizeSynT)
+        synT_list = load_syn_data(syn_cache_path)
+
+        if synT_list is None:
+            model = create_model(model_config, metadata)
+            model.set_seed(SEED)
+            model.fit(rawTout)
+            synT_list = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
+            save_syn_data(syn_cache_path, synT_list)
+
+        model_name = model_config[0]
 
         attacks = {}
         for sa, atype in sensitive_attrs.items():
@@ -54,59 +66,57 @@ def inference_eval_gm_worker(iter_idx, model_config, rawTout, targets, targetIDs
 
         results = {}
 
-        model.fit(rawTout)
-        synTwithoutTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
-
         for sa, Attack in attacks.items():
             for tid in targetIDs:
+                target = targets.loc[[tid]]
+                targetAux = target.loc[[tid], Attack.knownAttributes]
+                targetSecret = target.loc[tid, Attack.sensitiveAttribute]
+
                 results[(tid, sa)] = {
-                    'AttackerGuess': [], 'ProbCorrect': [],
-                    'TargetPresence': [LABEL_OUT for _ in range(nSynT)]
+                    'AttackerGuess': [],
+                    'ProbCorrect': [],
+                    'TargetPresence': []
                 }
 
-            for syn in synTwithoutTarget:
-                Attack.set_seed(SEED)
-                Attack.train(syn)
-                for tid in targetIDs:
-                    target = targets.loc[[tid]]
-                    targetAux = target.loc[[tid], Attack.knownAttributes]
-                    targetSecret = target.loc[tid, Attack.sensitiveAttribute]
-
-                    guess = Attack.attack(targetAux)
-                    pCorrect = Attack.get_likelihood(targetAux, targetSecret)
+                for syn in synT_list:
+                    guess = Attack.attack(targetAux, attemptLinkage=False, data=syn)
+                    pCorrect = Attack.get_likelihood(targetAux, targetSecret, attemptLinkage=False, data=syn)
 
                     results[(tid, sa)]['AttackerGuess'].append(guess)
                     results[(tid, sa)]['ProbCorrect'].append(pCorrect)
+                    results[(tid, sa)]['TargetPresence'].append(LABEL_OUT)
 
+        # 2. IN evaluation
         for tid in targetIDs:
             target = targets.loc[[tid]]
             rawTin = pd.concat([rawTout, target])
 
+            # Re-train/generate for "with target" data (not cached)
+            model = create_model(model_config, metadata)
+            model.set_seed(SEED)
             model.fit(rawTin)
             synTwithTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
-
+            
             for sa, Attack in attacks.items():
                 targetAux = target.loc[[tid], Attack.knownAttributes]
                 targetSecret = target.loc[tid, Attack.sensitiveAttribute]
 
                 for syn in synTwithTarget:
-                    Attack.train(syn)
-
-                    guess = Attack.attack(targetAux)
-                    pCorrect = Attack.get_likelihood(targetAux, targetSecret)
+                    guess = Attack.attack(targetAux, attemptLinkage=False, data=syn)
+                    pCorrect = Attack.get_likelihood(targetAux, targetSecret, attemptLinkage=False, data=syn)
 
                     results[(tid, sa)]['AttackerGuess'].append(guess)
                     results[(tid, sa)]['ProbCorrect'].append(pCorrect)
                     results[(tid, sa)]['TargetPresence'].append(LABEL_IN)
 
-        return (iter_idx, model.__name__, results)
+        return (iter_idx, model_name, results)
     except Exception as e:
         LOGGER.error(f"Inference evaluation failed for model {model_config[0]}: {e}")
         return (iter_idx, model_config[0], {})
 
 
 def inference_eval_san_worker(iter_idx, model_config, rawTout, targets, targetIDs,
-                               sensitive_attrs, metadata, runconfig):
+                               sensitive_attrs, metadata, runconfig, dname, cache_dir):
     """Evaluate one sanitiser for inference attack across all targets.
     :return: tuple: (iter_idx, model_name, {(tid, sa): result_dict})
     """
@@ -161,7 +171,7 @@ def inference_eval_san_worker(iter_idx, model_config, rawTout, targets, targetID
                 results[(tid, sa)]['ProbCorrect'].append(pCorrect)
                 results[(tid, sa)]['TargetPresence'].append(LABEL_IN)
 
-        return (iter_idx, model.__name__, results)
+        return (iter_idx, model.name, results)
     except Exception as e:
         LOGGER.error(f"Inference evaluation failed for sanitiser {model_config[0]}: {e}")
         return (iter_idx, model_config[0], {})
@@ -295,7 +305,8 @@ def main():
         rawTout = all_rawTout[nr]
         for cfg in engine.gm_configs:
             gm_tasks.append((nr, cfg, rawTout, targets, targetIDs,
-                             runconfig['sensitiveAttributes'], metadata, runconfig))
+                             runconfig['sensitiveAttributes'], metadata, runconfig,
+                             engine.dname, engine.cache_dir))
             gm_iter_idxs.append(nr)
         for cfg in engine.san_configs:
             san_tasks.append((nr, cfg, rawTout, targets, targetIDs,

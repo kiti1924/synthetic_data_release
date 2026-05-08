@@ -145,6 +145,8 @@ def _cached_worker_fn(worker_fn, task, cache_path):
     
     if cache_path:
         try:
+            # Ensure cache directory exists
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             # Atomic save to prevent corruption, using PID to avoid process collisions
             tmp_path = f"{cache_path}.tmp.{os.getpid()}"
             with open(tmp_path, 'wb') as f:
@@ -314,3 +316,50 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
         pbar.update(len(results))
             
     return results
+
+
+def get_syn_data_cache_path(cache_dir, model_config, dname, iter_idx, nSynT, sizeSynT):
+    """Generate a unique path for cached synthetic data."""
+    import hashlib
+    if cache_dir is None:
+        return None
+    
+    config_str = str(model_config).encode('utf-8')
+    config_hash = hashlib.md5(config_str).hexdigest()[:8]
+    model_name = str(model_config[0]).replace('/', '_').replace(' ', '_')
+    
+    # Key includes model, dataset, iteration, and generation parameters
+    filename = f"syn_{model_name}_{config_hash}_{dname}_iter{iter_idx}_n{nSynT}_s{sizeSynT}.pkl"
+    return os.path.join(cache_dir, "syn_data", filename)
+
+
+def load_syn_data(cache_path):
+    """Load synthetic data list from cache if it exists."""
+    if cache_path and os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'rb') as f:
+                res = pickle.load(f)
+            from utils.parallel import LOGGER
+            LOGGER.info(f"Loaded cached synthetic data from {os.path.basename(cache_path)}")
+            return res
+        except Exception as e:
+            from utils.parallel import LOGGER
+            LOGGER.warning(f"Failed to load syn data cache {cache_path}: {e}")
+    return None
+
+
+def save_syn_data(cache_path, syn_data_list):
+    """Save synthetic data list to cache atomically."""
+    if not cache_path:
+        return
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        import os
+        import pickle
+        tmp_path = f"{cache_path}.tmp.{os.getpid()}"
+        with open(tmp_path, 'wb') as f:
+            pickle.dump(syn_data_list, f)
+        os.replace(tmp_path, cache_path)
+    except Exception as e:
+        from utils.parallel import LOGGER
+        LOGGER.warning(f"Failed to save syn data cache {cache_path}: {e}")
