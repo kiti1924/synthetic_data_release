@@ -164,17 +164,17 @@ def _cached_worker_fn(worker_fn, task, cache_path):
         
         res = worker_fn(*task)
     
-    if cache_path:
-        try:
-            # Ensure cache directory exists
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            # Atomic save to prevent corruption, using UUID to avoid cross-node collisions
-            tmp_path = f"{cache_path}.tmp.{uuid.uuid4().hex}"
-            joblib.dump(res, tmp_path, compress=1)
-            os.replace(tmp_path, cache_path)
-        except Exception as e:
-            LOGGER.warning(f"Failed to save cache {cache_path}: {e}")
-            
+        if cache_path:
+            try:
+                # Ensure cache directory exists
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                # Atomic save to prevent corruption, using UUID to avoid cross-node collisions
+                tmp_path = f"{cache_path}.tmp.{uuid.uuid4().hex}"
+                joblib.dump(res, tmp_path, compress=1)
+                os.replace(tmp_path, cache_path)
+            except Exception as e:
+                LOGGER.warning(f"Failed to save cache {cache_path}: {e}")
+                
         return res
     finally:
         np.random.set_state(np_state)
