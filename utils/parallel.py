@@ -134,8 +134,7 @@ import pickle
 def _cached_worker_fn(worker_fn, task, cache_path):
     if cache_path and os.path.exists(cache_path):
         try:
-            with open(cache_path, 'rb') as f:
-                res = pickle.load(f)
+            res = joblib.load(cache_path)
             LOGGER.info(f"Loaded cached result from {os.path.basename(cache_path)}")
             return res
         except Exception as e:
@@ -149,8 +148,7 @@ def _cached_worker_fn(worker_fn, task, cache_path):
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
             # Atomic save to prevent corruption, using PID to avoid process collisions
             tmp_path = f"{cache_path}.tmp.{os.getpid()}"
-            with open(tmp_path, 'wb') as f:
-                pickle.dump(res, f)
+            joblib.dump(res, tmp_path, compress=1)
             os.replace(tmp_path, cache_path)
         except Exception as e:
             LOGGER.warning(f"Failed to save cache {cache_path}: {e}")
@@ -337,8 +335,7 @@ def load_syn_data(cache_path):
     """Load synthetic data list from cache if it exists."""
     if cache_path and os.path.exists(cache_path):
         try:
-            with open(cache_path, 'rb') as f:
-                res = pickle.load(f)
+            res = joblib.load(cache_path)
             from utils.parallel import LOGGER
             LOGGER.info(f"Loaded cached synthetic data from {os.path.basename(cache_path)}")
             return res
@@ -355,10 +352,8 @@ def save_syn_data(cache_path, syn_data_list):
     try:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         import os
-        import pickle
         tmp_path = f"{cache_path}.tmp.{os.getpid()}"
-        with open(tmp_path, 'wb') as f:
-            pickle.dump(syn_data_list, f)
+        joblib.dump(syn_data_list, tmp_path, compress=1)
         os.replace(tmp_path, cache_path)
     except Exception as e:
         from utils.parallel import LOGGER
