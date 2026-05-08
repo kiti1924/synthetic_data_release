@@ -172,6 +172,71 @@ def utility_eval_san_worker(iter_idx, model_config, rawTout, targets, targetIDs,
         return (iter_idx, model_config[0], {}, {})
 
 
+def utility_eval_raw_worker(iter_idx, rawTout, targets, targetIDs,
+                            utility_task_configs, testRecords, testRecordIDs,
+                            rawTest, metadata, runconfig):
+    """Evaluate utility on raw data for one iteration.
+    :return: tuple: (iter_idx, results_target dict, results_agg dict)
+    """
+    try:
+        results_target = {} # { (ut_name, tid_or_out): result_dict }
+        results_agg = {}    # { ut_name: [ (tid_or_out, accuracy, failures) ] }
+
+        # 1. OUT evaluation
+        for ut_cfg in utility_task_configs:
+            ut = create_utility_task(ut_cfg, metadata)
+            ut.set_seed(SEED)
+            predErrorTargets = []
+            predErrorAggr = []
+            for _ in range(runconfig['nSynT']):
+                ut.train(rawTout)
+                predErrorTargets.append(ut.evaluate(testRecords))
+                predErrorAggr.append(ut.evaluate(rawTest))
+
+            _arr_t = np.array(predErrorTargets, dtype=float)
+            _arr_a = np.array(predErrorAggr, dtype=float)
+            _fail_t = int(np.isnan(_arr_t).all(axis=1).sum()) if _arr_t.ndim == 2 else int(np.isnan(_arr_t).sum())
+            _fail_a = int(np.isnan(_arr_a).sum())
+
+            results_target[(ut.__name__, 'OUT')] = {
+                'TestRecordID': testRecordIDs,
+                'Accuracy': list(mean(_arr_t, axis=0)),
+                'Failures': _fail_t
+            }
+            results_agg.setdefault(ut.__name__, []).append(('OUT', mean(_arr_a), _fail_a))
+
+        # 2. Per-target evaluation
+        for tid in targetIDs:
+            target = targets.loc[[tid]]
+            rawIn = pd.concat([rawTout, target])
+            for ut_cfg in utility_task_configs:
+                ut = create_utility_task(ut_cfg, metadata)
+                ut.set_seed(SEED)
+                predErrorTargets = []
+                predErrorAggr = []
+                for _ in range(runconfig['nSynT']):
+                    ut.train(rawIn)
+                    predErrorTargets.append(ut.evaluate(testRecords))
+                    predErrorAggr.append(ut.evaluate(rawTest))
+
+                _arr_t = np.array(predErrorTargets, dtype=float)
+                _arr_a = np.array(predErrorAggr, dtype=float)
+                _fail_t = int(np.isnan(_arr_t).all(axis=1).sum()) if _arr_t.ndim == 2 else int(np.isnan(_arr_t).sum())
+                _fail_a = int(np.isnan(_arr_a).sum())
+
+                results_target[(ut.__name__, tid)] = {
+                    'TestRecordID': testRecordIDs,
+                    'Accuracy': list(mean(_arr_t, axis=0)),
+                    'Failures': _fail_t
+                }
+                results_agg.setdefault(ut.__name__, []).append((tid, mean(_arr_a), _fail_a))
+
+        return (iter_idx, results_target, results_agg)
+    except Exception as e:
+        LOGGER.error(f"Raw utility evaluation failed for iteration {iter_idx}: {e}")
+        return (iter_idx, {}, {})
+
+
 def main():
     engine = EvaluationEngine(description="Command-line interface for running utility evaluation")
     engine.setup(cwd)
@@ -250,60 +315,35 @@ def main():
         rIdx = choice(list(rawTrainWoTargets.index), size=runconfig['sizeRawT'], replace=False).tolist()
         all_rawTout.append(rawTrain.loc[rIdx])
 
+    ###############
+    ## PARALLEL RAW EVALUATION (Distributed via MPI)
+    ###############
+    raw_tasks = []
+    raw_iter_idxs = []
     if not engine.is_worker:
-        LOGGER.info('Start: Utility evaluation on Raw...')
         for nr in range(runconfig['nIter']):
-            rawTout = all_rawTout[nr]
-            for ut_cfg in utility_task_configs:
-                ut = create_utility_task(ut_cfg, metadata)
-                ut.set_seed(SEED)
-                resultsTargetUtility[ut.__name__]['Raw'][nr] = {}
-                predErrorTargets = []
-                predErrorAggr = []
-                for _ in range(runconfig['nSynT']):
-                    ut.train(rawTout)
-                    predErrorTargets.append(ut.evaluate(testRecords))
-                    predErrorAggr.append(ut.evaluate(rawTest))
+            raw_tasks.append((nr, all_rawTout[nr], targets, targetIDs,
+                             utility_task_configs, testRecords, testRecordIDs, rawTest, metadata, runconfig))
+            raw_iter_idxs.append(nr)
 
-                _arr_targets = np.array(predErrorTargets, dtype=float)
-                _arr_aggr = np.array(predErrorAggr, dtype=float)
-                _failures_targets = int(np.isnan(_arr_targets).all(axis=1).sum()) if _arr_targets.ndim == 2 else int(np.isnan(_arr_targets).sum())
-                _failures_aggr = int(np.isnan(_arr_aggr).sum())
-                resultsTargetUtility[ut.__name__]['Raw'][nr]['OUT'] = {
-                    'TestRecordID': testRecordIDs,
-                    'Accuracy': list(mean(_arr_targets, axis=0)),
-                    'Failures': _failures_targets
-                }
-                resultsAggUtility[ut.__name__]['Raw']['TargetID'].append('OUT')
-                resultsAggUtility[ut.__name__]['Raw']['Accuracy'].append(mean(_arr_aggr))
-                resultsAggUtility[ut.__name__]['Raw']['Failures'].append(_failures_aggr)
+    raw_results = engine.run_parallel_evaluation(
+        eval_gm_worker=utility_eval_raw_worker,
+        san_tasks=[],
+        gm_tasks=raw_tasks,
+        gm_iter_idxs=raw_iter_idxs,
+        desc_prefix="raw_eval"
+    )
 
-            for tid in targetIDs:
-                target = targets.loc[[tid]]
-                rawIn = pd.concat([rawTout, target])
-                for ut_cfg in utility_task_configs:
-                    ut = create_utility_task(ut_cfg, metadata)
-                    ut.set_seed(SEED)
-                    predErrorTargets = []
-                    predErrorAggr = []
-                    for _ in range(runconfig['nSynT']):
-                        ut.train(rawIn)
-                        predErrorTargets.append(ut.evaluate(testRecords))
-                        predErrorAggr.append(ut.evaluate(rawTest))
-
-                    _arr_targets = np.array(predErrorTargets, dtype=float)
-                    _arr_aggr = np.array(predErrorAggr, dtype=float)
-                    _failures_targets = int(np.isnan(_arr_targets).all(axis=1).sum()) if _arr_targets.ndim == 2 else int(np.isnan(_arr_targets).sum())
-                    _failures_aggr = int(np.isnan(_arr_aggr).sum())
-                    resultsTargetUtility[ut.__name__]['Raw'][nr][tid] = {
-                        'TestRecordID': testRecordIDs,
-                        'Accuracy': list(mean(_arr_targets, axis=0)),
-                        'Failures': _failures_targets
-                    }
-                    resultsAggUtility[ut.__name__]['Raw']['TargetID'].append(tid)
-                    resultsAggUtility[ut.__name__]['Raw']['Accuracy'].append(mean(_arr_aggr))
-                    resultsAggUtility[ut.__name__]['Raw']['Failures'].append(_failures_aggr)
-        LOGGER.info('Finished: Utility evaluation on Raw.')
+    if not engine.is_worker:
+        for nr, results_target, results_agg in raw_results:
+            for (ut_name, tid_or_out), result_dict in results_target.items():
+                resultsTargetUtility[ut_name]['Raw'][nr] = result_dict
+            
+            for ut_name, entries in results_agg.items():
+                for tid_or_out, accuracy, failures in entries:
+                    resultsAggUtility[ut_name]['Raw']['TargetID'].append(tid_or_out)
+                    resultsAggUtility[ut_name]['Raw']['Accuracy'].append(accuracy)
+                    resultsAggUtility[ut_name]['Raw']['Failures'].append(failures)
 
     ###############
     ## PARALLEL MODEL EVALUATION (Flattened across iterations)

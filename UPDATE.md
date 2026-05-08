@@ -7,6 +7,14 @@ This document highlights the major updates and improvements made to the framewor
 To handle large-scale datasets and numerous computationally expensive generative models, the framework now supports **distributed parallel execution using MPI (Message Passing Interface)** via `mpi4py`.
 
 ### Key Features
+- **Distributed Evaluation Engine**: A robust framework (`EvaluationEngine`) that coordinates task distribution.
+- **Hierarchical Parallelism**: Combines MPI for inter-node communication and `joblib` for intra-node core utilization.
+- **Task Flattening (Performance Optimized)**: Evaluation tasks are flattened across all iterations, allowing all nodes to work on all model/iteration pairs simultaneously, maximizing throughput on supercomputers.
+- **Dual-Mode Execution**:
+    - **MPI Mode**: Automatically activated when running with `mpirun`.
+    - **Local Mode**: Falls back to standard multi-processing on local machines, ensuring full backward compatibility.
+
+## Execution Patterns
 - **Multi-Node & Multi-Core Scaling**: Models and evaluation tasks can be distributed across a cluster of nodes, bypassing the single-machine limits of `joblib`.
 - **Hierarchical Parallelism (MPI + Joblib)**: Rank 0 dynamically distributes task chunks across MPI nodes. Within each node, tasks are further parallelized locally using `joblib` (with the `loky` backend) to efficiently share memory for large DataFrames, minimizing inter-process communication overhead.
 - **Unified CLI Rank Management**: A centralized `EvaluationEngine` handles all boilerplate execution. Rank 0 exclusively handles directory creation, logging, result aggregation, and data broadcasting (`bcast`), while worker ranks (`rank > 0`) bypass redundant I/O operations, ensuring clean logs and avoiding race conditions.

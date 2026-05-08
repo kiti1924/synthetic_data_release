@@ -197,10 +197,27 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
 
     try:
         from mpi4py import MPI
+        # Check if actually running in an MPI environment with more than 1 rank
         if MPI.COMM_WORLD.Get_size() > 1:
             use_mpi = True
+        else:
+            # size=1 but MPI is loaded, we can still use the MPI code path or fallback
+            pass
     except (ImportError, RuntimeError):
         use_mpi = False
+
+    # --- EXECUTION PATH VISUALIZATION ---
+    if use_mpi:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+        if rank == 0:
+            LOGGER.info(f"🚀 [{desc}] MODE: MPI (Distributed across {size} nodes)")
+            LOGGER.info(f"   Strategy: Hierarchical Dynamic Queue (MPI Inter-node + Joblib Intra-node)")
+    else:
+        LOGGER.info(f"💻 [{desc}] MODE: Local Parallel (Joblib/LOKY)")
+        LOGGER.info(f"   Strategy: Multi-processing on {max_workers} cores")
 
     if use_mpi:
         from mpi4py import MPI
