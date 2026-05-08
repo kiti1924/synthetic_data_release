@@ -2,6 +2,21 @@
 
 This document highlights the major updates and improvements made to the framework compared to the original repository.
 
+## 0. Environment Setup
+
+For execution in supercomputer or cluster environments (e.g., Cray XD2000), use the provided `setup.sh` script to build the environment. This script ensures that `mpi4py` is correctly linked with the system's MPI libraries.
+
+```bash
+# 1. Run the setup script on the login node
+bash setup.sh
+
+# 2. Activate the virtual environment
+source .venv/bin/activate
+
+# 3. Submit your batch script (e.g., job.sh) to the job scheduler
+qsub job.sh
+```
+
 ## 1. MPI Support for Distributed Execution
 
 To handle large-scale datasets and numerous computationally expensive generative models, the framework now supports **distributed parallel execution using MPI (Message Passing Interface)** via `mpi4py`.
