@@ -89,9 +89,11 @@ def linkage_attack_worker(model_config, tid, target, rawA, metadata, runconfig):
         return (tid, model_config[0], {}, _deep_tuple(model_config))
 
 
-def linkage_eval_worker(model_config, rawTout, targets, targetIDs,
+def linkage_eval_worker(iter_idx, model_config, rawTout, targets, targetIDs,
                         attacks_for_model, metadata, runconfig):
-    """Evaluate one model across all targets for one game iteration."""
+    """Evaluate one model across all targets for one game iteration.
+    :return: tuple: (iter_idx, model_name, per_target_results)
+    """
     try:
         model = create_model(model_config, metadata)
         model.set_seed(SEED)
@@ -140,10 +142,10 @@ def linkage_eval_worker(model_config, rawTout, targets, targetIDs,
                         'AttackerGuess': attackerGuesses
                     }
 
-        return (model.__name__, per_target_results)
+        return (iter_idx, model.__name__, per_target_results)
     except Exception as e:
         LOGGER.error(f"Linkage evaluation failed for model {model_config[0]}: {e}")
-        return (model_config[0], {})
+        return (iter_idx, model_config[0], {})
 
 
 def main():
@@ -211,36 +213,43 @@ def main():
     ##################################
     resultsTargetPrivacy = {tid: {} for tid in targetIDs}
 
+    all_rawTout = []
     for nr in range(runconfig['nIter']):
         rIdx = choice(list(rawPopDropTargets.index), size=runconfig['sizeRawT'], replace=False).tolist()
-        rawTout = rawPopDropTargets.loc[rIdx]
+        all_rawTout.append(rawPopDropTargets.loc[rIdx])
 
-        eval_gm_tasks = [
-            (cfg, rawTout, targets, targetIDs,
-             {tid: attacks[tid][cfg_to_model_name[_deep_tuple(cfg)]] for tid in targetIDs},
-             metadata, runconfig)
-            for cfg in engine.gm_configs
-        ]
-        eval_san_tasks = [
-            (cfg, rawTout, targets, targetIDs,
-             {tid: attacks[tid][cfg_to_model_name[_deep_tuple(cfg)]] for tid in targetIDs},
-             metadata, runconfig)
-            for cfg in engine.san_configs
-        ]
-        
-        eval_results = engine.run_parallel_evaluation(
-            eval_gm_worker=linkage_eval_worker,
-            san_tasks=eval_san_tasks,
-            gm_tasks=eval_gm_tasks,
-            iter_idx=nr,
-            desc_prefix="eval iter"
-        )
+    eval_gm_tasks = []
+    eval_gm_iter_idxs = []
+    eval_san_tasks = []
+    eval_san_iter_idxs = []
 
-        for model_name, per_target in eval_results:
-            for tid, feature_results in per_target.items():
-                if model_name not in resultsTargetPrivacy[tid]:
-                    resultsTargetPrivacy[tid][model_name] = {}
-                resultsTargetPrivacy[tid][model_name][nr] = feature_results
+    for nr in range(runconfig['nIter']):
+        rawTout = all_rawTout[nr]
+        for cfg in engine.gm_configs:
+            eval_gm_tasks.append((nr, cfg, rawTout, targets, targetIDs,
+                                 {tid: attacks[tid][cfg_to_model_name[_deep_tuple(cfg)]] for tid in targetIDs},
+                                 metadata, runconfig))
+            eval_gm_iter_idxs.append(nr)
+        for cfg in engine.san_configs:
+            eval_san_tasks.append((nr, cfg, rawTout, targets, targetIDs,
+                                  {tid: attacks[tid][cfg_to_model_name[_deep_tuple(cfg)]] for tid in targetIDs},
+                                  metadata, runconfig))
+            eval_san_iter_idxs.append(nr)
+
+    eval_results = engine.run_parallel_evaluation(
+        eval_gm_worker=linkage_eval_worker,
+        san_tasks=eval_san_tasks,
+        gm_tasks=eval_gm_tasks,
+        san_iter_idxs=eval_san_iter_idxs,
+        gm_iter_idxs=eval_gm_iter_idxs,
+        desc_prefix="eval iter"
+    )
+
+    for nr, model_name, per_target in eval_results:
+        for tid, feature_results in per_target.items():
+            if model_name not in resultsTargetPrivacy[tid]:
+                resultsTargetPrivacy[tid][model_name] = {}
+            resultsTargetPrivacy[tid][model_name][nr] = feature_results
 
     engine.dump_results(resultsTargetPrivacy, prefix="ResultsMIA")
 

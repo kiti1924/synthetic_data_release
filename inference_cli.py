@@ -34,10 +34,10 @@ cwd = path.dirname(__file__)
 SEED = 42
 
 
-def inference_eval_gm_worker(model_config, rawTout, targets, targetIDs,
+def inference_eval_gm_worker(iter_idx, model_config, rawTout, targets, targetIDs,
                              sensitive_attrs, metadata, runconfig):
     """Evaluate one generative model for inference attack across all targets.
-    :return: tuple: (model_name, {(tid, sa): result_dict})
+    :return: tuple: (iter_idx, model_name, {(tid, sa): result_dict})
     """
     try:
         model = create_model(model_config, metadata)
@@ -99,16 +99,16 @@ def inference_eval_gm_worker(model_config, rawTout, targets, targetIDs,
                     results[(tid, sa)]['ProbCorrect'].append(pCorrect)
                     results[(tid, sa)]['TargetPresence'].append(LABEL_IN)
 
-        return (model.__name__, results)
+        return (iter_idx, model.__name__, results)
     except Exception as e:
         LOGGER.error(f"Inference evaluation failed for model {model_config[0]}: {e}")
-        return (model_config[0], {})
+        return (iter_idx, model_config[0], {})
 
 
-def inference_eval_san_worker(model_config, rawTout, targets, targetIDs,
-                              sensitive_attrs, metadata, runconfig):
+def inference_eval_san_worker(iter_idx, model_config, rawTout, targets, targetIDs,
+                               sensitive_attrs, metadata, runconfig):
     """Evaluate one sanitiser for inference attack across all targets.
-    :return: tuple: (model_name, {(tid, sa): result_dict})
+    :return: tuple: (iter_idx, model_name, {(tid, sa): result_dict})
     """
     try:
         model = create_model(model_config, metadata)
@@ -161,10 +161,10 @@ def inference_eval_san_worker(model_config, rawTout, targets, targetIDs,
                 results[(tid, sa)]['ProbCorrect'].append(pCorrect)
                 results[(tid, sa)]['TargetPresence'].append(LABEL_IN)
 
-        return (model.__name__, results)
+        return (iter_idx, model.__name__, results)
     except Exception as e:
         LOGGER.error(f"Inference evaluation failed for sanitiser {model_config[0]}: {e}")
-        return (model_config[0], {})
+        return (iter_idx, model_config[0], {})
 
 
 def main():
@@ -200,14 +200,14 @@ def main():
         for tid in targetIDs
     }
 
+    all_rawTout = []
     for nr in range(runconfig['nIter']):
         rIdx = choice(list(rawPopDropTargets.index), size=runconfig['sizeRawT'], replace=False).tolist()
-        rawTout = rawPopDropTargets.loc[rIdx]
+        all_rawTout.append(rawPopDropTargets.loc[rIdx])
 
-        ###############
-        ## RAW ATTACKS (keep serial - small computation)
-        ###############
-        if not engine.is_worker:
+    if not engine.is_worker:
+        for nr in range(runconfig['nIter']):
+            rawTout = all_rawTout[nr]
             attacks = {}
             for sa, atype in runconfig['sensitiveAttributes'].items():
                 if atype == 'LinReg':
@@ -247,34 +247,40 @@ def main():
                     resultsTargetPrivacy[tid][sa]['Raw'][nr]['ProbCorrect'].append(pCorrect)
                     resultsTargetPrivacy[tid][sa]['Raw'][nr]['TargetPresence'].append(LABEL_IN)
 
-        ###############
-        ## PARALLEL MODEL EVALUATION
-        ###############
-        gm_tasks = [
-            (cfg, rawTout, targets, targetIDs,
-             runconfig['sensitiveAttributes'], metadata, runconfig)
-            for cfg in engine.gm_configs
-        ]
-        san_tasks = [
-            (cfg, rawTout, targets, targetIDs,
-             runconfig['sensitiveAttributes'], metadata, runconfig)
-            for cfg in engine.san_configs
-        ]
+    ###############
+    ## PARALLEL MODEL EVALUATION (Flattened across iterations)
+    ###############
+    gm_tasks = []
+    gm_iter_idxs = []
+    san_tasks = []
+    san_iter_idxs = []
 
-        all_results = engine.run_parallel_evaluation(
-            eval_gm_worker=inference_eval_gm_worker,
-            eval_san_worker=inference_eval_san_worker,
-            san_tasks=san_tasks,
-            gm_tasks=gm_tasks,
-            iter_idx=nr,
-            desc_prefix="eval"
-        )
+    for nr in range(runconfig['nIter']):
+        rawTout = all_rawTout[nr]
+        for cfg in engine.gm_configs:
+            gm_tasks.append((nr, cfg, rawTout, targets, targetIDs,
+                             runconfig['sensitiveAttributes'], metadata, runconfig))
+            gm_iter_idxs.append(nr)
+        for cfg in engine.san_configs:
+            san_tasks.append((nr, cfg, rawTout, targets, targetIDs,
+                              runconfig['sensitiveAttributes'], metadata, runconfig))
+            san_iter_idxs.append(nr)
 
-        for model_name, results in all_results:
-            for (tid, sa), result_dict in results.items():
-                if model_name not in resultsTargetPrivacy[tid][sa]:
-                    resultsTargetPrivacy[tid][sa][model_name] = {}
-                resultsTargetPrivacy[tid][sa][model_name][nr] = result_dict
+    all_results = engine.run_parallel_evaluation(
+        eval_gm_worker=inference_eval_gm_worker,
+        eval_san_worker=inference_eval_san_worker,
+        san_tasks=san_tasks,
+        gm_tasks=gm_tasks,
+        san_iter_idxs=san_iter_idxs,
+        gm_iter_idxs=gm_iter_idxs,
+        desc_prefix="eval"
+    )
+
+    for nr, model_name, results in all_results:
+        for (tid, sa), result_dict in results.items():
+            if model_name not in resultsTargetPrivacy[tid][sa]:
+                resultsTargetPrivacy[tid][sa][model_name] = {}
+            resultsTargetPrivacy[tid][sa][model_name][nr] = result_dict
 
     engine.dump_results(resultsTargetPrivacy, prefix="ResultsMLEAI")
 
