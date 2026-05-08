@@ -1,6 +1,7 @@
 """Parallel execution utilities for model evaluation"""
 import importlib
 import os
+import uuid
 import warnings
 from multiprocessing import cpu_count
 import joblib
@@ -132,28 +133,52 @@ def _gpu_device_requested():
 import pickle
 
 def _cached_worker_fn(worker_fn, task, cache_path):
-    if cache_path and os.path.exists(cache_path):
-        try:
-            res = joblib.load(cache_path)
-            LOGGER.info(f"Loaded cached result from {os.path.basename(cache_path)}")
-            return res
-        except Exception as e:
-            LOGGER.warning(f"Failed to load cache {cache_path}: {e}. Recomputing.")
+    import hashlib
+    import numpy as np
+    import random
     
-    res = worker_fn(*task)
+    # Derive deterministic seed from cache_path or task representation
+    seed_str = os.path.basename(cache_path) if cache_path else str(task)
+    task_seed = int(hashlib.md5(seed_str.encode('utf-8')).hexdigest(), 16) % (2**32)
+    
+    # Save global state to prevent side effects in sequential/main-process runs
+    np_state = np.random.get_state()
+    py_state = random.getstate()
+    
+    try:
+        np.random.seed(task_seed)
+        random.seed(task_seed)
+        try:
+            import torch
+            torch.manual_seed(task_seed)
+        except ImportError:
+            pass
+
+        if cache_path and os.path.exists(cache_path):
+            try:
+                res = joblib.load(cache_path)
+                LOGGER.info(f"Loaded cached result from {os.path.basename(cache_path)}")
+                return res
+            except Exception as e:
+                LOGGER.warning(f"Failed to load cache {cache_path}: {e}. Recomputing.")
+        
+        res = worker_fn(*task)
     
     if cache_path:
         try:
             # Ensure cache directory exists
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            # Atomic save to prevent corruption, using PID to avoid process collisions
-            tmp_path = f"{cache_path}.tmp.{os.getpid()}"
+            # Atomic save to prevent corruption, using UUID to avoid cross-node collisions
+            tmp_path = f"{cache_path}.tmp.{uuid.uuid4().hex}"
             joblib.dump(res, tmp_path, compress=1)
             os.replace(tmp_path, cache_path)
         except Exception as e:
             LOGGER.warning(f"Failed to save cache {cache_path}: {e}")
             
-    return res
+        return res
+    finally:
+        np.random.set_state(np_state)
+        random.setstate(py_state)
 
 def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache_keys=None, cache_dir=None):
     """Run tasks in parallel using multiprocessing.Pool with tqdm progress bar.
@@ -173,21 +198,10 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
     use_mpi = os.environ.get('USE_MPI', '0') == '1'
 
     if max_workers == 1 and not use_mpi:
-        import numpy as np
-        import random
-        # 逐次実行時（メインプロセス）にモデル内で乱数が消費・リセットされても、
-        # メインプロセスの乱数状態に影響を与えないように状態を退避・復元する。
-        # これによりキャッシュヒット時と通常実行時の後続の再現性を完全に一致させる。
-        np_state = np.random.get_state()
-        py_state = random.getstate()
-        try:
-            return [
-                _cached_worker_fn(worker_fn, task, os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None)
-                for i, task in tqdm(enumerate(tasks), total=len(tasks), desc=desc)
-            ]
-        finally:
-            np.random.set_state(np_state)
-            random.setstate(py_state)
+        return [
+            _cached_worker_fn(worker_fn, task, os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None)
+            for i, task in tqdm(enumerate(tasks), total=len(tasks), desc=desc)
+        ]
     if max_workers is None and not use_mpi:
         has_gpu_tasks = any(model_requires_gpu(task[0]) for task in tasks if task and isinstance(task[0], (tuple, list, str)))
         if _gpu_device_requested() and has_gpu_tasks:
@@ -307,11 +321,14 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
     # Use joblib.Parallel instead of multiprocessing.Pool
     # Loky backend automatically uses memmapping for arrays > 1MB, solving the IPC bottleneck
     with tqdm(total=len(tasks), desc=desc) as pbar:
-        results = joblib.Parallel(n_jobs=max_workers, backend='loky')(
+        parallel = joblib.Parallel(n_jobs=max_workers, backend='loky', return_as='generator')
+        results = []
+        for res in parallel(
             joblib.delayed(_cached_worker_fn)(worker_fn, task, os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None) 
             for i, task in enumerate(tasks)
-        )
-        pbar.update(len(results))
+        ):
+            results.append(res)
+            pbar.update(1)
             
     return results
 
@@ -340,7 +357,6 @@ def load_syn_data(cache_path):
             LOGGER.info(f"Loaded cached synthetic data from {os.path.basename(cache_path)}")
             return res
         except Exception as e:
-            from utils.parallel import LOGGER
             LOGGER.warning(f"Failed to load syn data cache {cache_path}: {e}")
     return None
 
@@ -351,10 +367,8 @@ def save_syn_data(cache_path, syn_data_list):
         return
     try:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        import os
-        tmp_path = f"{cache_path}.tmp.{os.getpid()}"
+        tmp_path = f"{cache_path}.tmp.{uuid.uuid4().hex}"
         joblib.dump(syn_data_list, tmp_path, compress=1)
         os.replace(tmp_path, cache_path)
     except Exception as e:
-        from utils.parallel import LOGGER
         LOGGER.warning(f"Failed to save syn data cache {cache_path}: {e}")
