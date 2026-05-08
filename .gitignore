@@ -39,6 +39,7 @@ memo/
 *.log
 import_log.txt
 debug_imports.txt
+log.txt
 
 # SPC/cache files
 test.sh

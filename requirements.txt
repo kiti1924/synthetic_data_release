@@ -108,7 +108,7 @@ joblib==1.5.3
     #   scikit-learn
 jupyterlab-widgets==3.0.16
     # via ipywidgets
-k-anonymization @ git+https://github.com/SDC4Society/k_anonymization.git@compatibility/python-3.11
+k-anonymization @ git+https://github.com/SDC4Society/k_anonymization.git@aa515337497cd5a3149ad81c2425976f0bf29470
     # via synthetic-data-release (pyproject.toml)
 keras==3.14.0
     # via tensorflow
