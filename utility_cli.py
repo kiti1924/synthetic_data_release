@@ -337,11 +337,10 @@ def main():
     ###############
     raw_tasks = []
     raw_iter_idxs = []
-    if not engine.is_worker:
-        for nr in range(runconfig['nIter']):
-            raw_tasks.append((nr, all_rawTout[nr], targets, targetIDs,
-                             utility_task_configs, testRecords, testRecordIDs, rawTest, metadata, runconfig))
-            raw_iter_idxs.append(nr)
+    for nr in range(runconfig['nIter']):
+        raw_tasks.append((nr, all_rawTout[nr], targets, targetIDs,
+                         utility_task_configs, testRecords, testRecordIDs, rawTest, metadata, runconfig))
+        raw_iter_idxs.append(nr)
 
     raw_results = engine.run_parallel_evaluation(
         eval_gm_worker=utility_eval_raw_worker,
