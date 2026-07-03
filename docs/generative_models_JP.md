@@ -9,19 +9,21 @@
 本フレームワークに統合されている生成モデルは、**差分プライバシー（DP）対応モデル**と、**非プライベート（DP非対応）モデル**に大別されます。
 
 ### 差分プライバシー (DP) 対応モデル
-個人のプライバシーを数学的に保証（$\epsilon, \delta$-差分プライバシーを満たす）しながら合成データを生成するモデル群です。
+個人のプライバシーを数学的に保証しながら合成データを生成するモデル群です。内部で **$\epsilon$-DP (Pure DP)** を満たす手法と、**$(\epsilon, \delta)$-DP (Approximate DP)** を満たす手法（内部的には zCDP や RDP を使用）に分かれます。
 
-| モデル名 | 概要 | ラッパー実装 | 元アルゴリズム / ソース |
-| :--- | :--- | :--- | :--- |
-| **PrivBayes** | ベイジアンネットワーク構築時に指数メカニズムと確率テーブルへのラプラスノイズ付加を用いる手法。 | [data_synthesiser.py](../generative_models/data_synthesiser.py) | DataSynthesizer |
-| **AIM** | 適応的に低次元マージナル（周辺分布）を選択・計測し、Private-PGMでモデル化する手法。 | [aim.py](../generative_models/aim.py) | AIM (PVLDB 2022) |
-| **GEM** | 反復的DPに基づき、指定クエリ（ワークロード）に対する応答に適合するようにジェネレータ（WGAN）を学習させる手法。 | [gem.py](../generative_models/gem.py) | GEM (NeurIPS 2021) |
-| **DP_MERF** | ランダム特徴量と平均埋め込みによる最大エントロピー関係フォレストと、数値データのプライベート離散化（PrivTreeなど）を統合した手法。 | [dp_merf.py](../generative_models/dp_merf.py) | DP-MERF (AISTATS 2021) |
-| **PATE-GAN** | PATEフレームワークを利用し、複数の教師ディスクリミネータのノイズ付き投票を用いてGANをプライベートに学習する手法。 | [pate_gan.py](../generative_models/pate_gan.py) | PATE-GAN (ICLR 2019) |
-| **Private-GSD** | プライベートに測定された周辺分布に適合するデータを、遺伝的アルゴリズム（GA）を用いて最適化・探索する手法。 | [private_gsd.py](../generative_models/private_gsd.py) | Private-GSD (ICML 2023) |
-| **PrivMRF** | プライベートな周辺分布の測定値から、マルコフ確率場（MRF）モデルを構築してサンプリングする手法。 | [privmrf.py](../generative_models/privmrf.py) | PrivMRF (PVLDB 2021) |
-| **PrivSyn** | 自動選択された1〜2次元マージナルに整合する合成データを段階的に再構成する手法。 | [privsyn.py](../generative_models/privsyn.py) | PrivSyn (USENIX Security 2021) |
-| **RAPpp** | 周辺分布クエリへの応答を連続空間上で勾配降下法により最適化した後、離散データへと射影・再構築する手法。 | [rappp.py](../generative_models/rappp.py) | RAP++ (NeurIPS 2022) |
+| モデル名 | 概要 | プライバシー定義 | ラッパー実装 | 元アルゴリズム / ソース |
+| :--- | :--- | :--- | :--- | :--- |
+| **PrivBayes** | ベイジアンネットワーク構築時に指数メカニズムと確率テーブルへのラプラスノイズ付加を用いる手法。 | **$\epsilon$-DP** (Pure) | [data_synthesiser.py](../generative_models/data_synthesiser.py) | DataSynthesizer |
+| **AIM** | 適応的に低次元マージナル（周辺分布）を選択・計測し、Private-PGMでモデル化する手法。 | **$(\epsilon, \delta)$-DP** (zCDP経由) | [aim.py](../generative_models/aim.py) | AIM (PVLDB 2022) |
+| **GEM** | 反復的DPに基づき、指定クエリ（ワークロード）に対する応答に適合するようにジェネレータ（WGAN）を学習させる手法。 | **$(\epsilon, \delta)$-DP** (zCDP経由) | [gem.py](../generative_models/gem.py) | GEM (NeurIPS 2021) |
+| **DP_MERF** | ランダム特徴量と平均埋め込みによる最大エントロピー関係フォレストと、数値データのプライベート離散化（PrivTreeなど）を統合した手法。 | **$\epsilon$-DP** (注1) | [dp_merf.py](../generative_models/dp_merf.py) | DP-MERF (AISTATS 2021) |
+| **PATE-GAN** | PATEフレームワークを利用し、複数の教師ディスクリミネータのノイズ付き投票を用いてGANをプライベートに学習する手法。 | **$(\epsilon, \delta)$-DP** (RDP経由) | [pate_gan.py](../generative_models/pate_gan.py) | PATE-GAN (ICLR 2019) |
+| **Private-GSD** | プライベートに測定された周辺分布に適合するデータを、遺伝的アルゴリズム（GA）を用いて最適化・探索する手法。 | **$(\epsilon, \delta)$-DP** (zCDP経由) | [private_gsd.py](../generative_models/private_gsd.py) | Private-GSD (ICML 2023) |
+| **PrivMRF** | プライベートな周辺分布の測定値から、マルコフ確率場（MRF）モデルを構築してサンプリングする手法。 | **$(\epsilon, \delta)$-DP** (zCDP経由) | [privmrf.py](../generative_models/privmrf.py) | PrivMRF (PVLDB 2021) |
+| **PrivSyn** | 自動選択された1〜2次元マージナルに整合する合成データを段階的に再構成する手法。 | **$(\epsilon, \delta)$-DP** (zCDP経由) | [privsyn.py](../generative_models/privsyn.py) | PrivSyn (USENIX Security 2021) |
+| **RAPpp** | 周辺分布クエリへの応答を連続空間上で勾配降下法により最適化した後、離散データへと射影・再構築する手法。 | **$(\epsilon, \delta)$-DP** (zCDP経由) | [rappp.py](../generative_models/rappp.py) | RAP++ (NeurIPS 2022) |
+
+*(注1: `DP_MERF` は理論上 $(\epsilon, \delta)$-DP や zCDP に対応していますが、本リポジトリのラッパー上は `epsilon` のみを受け取る形となっており、さらにその値をそのまま zCDP の $\rho$ として下層に流す実装上のバグ/考慮不足が存在します。詳細は第2節を参照。)*
 
 ### 非プライベートモデル (DP非対応)
 プライバシー保護（ノイズ付加等）を行わず、データの有用性や表現力を最大化するための標準的な生成モデル群です。
