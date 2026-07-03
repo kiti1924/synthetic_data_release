@@ -44,3 +44,6 @@ log.txt
 # SPC/cache files
 *_test.sh
 cache
+
+# Tasks output
+/tasks/outputs/
