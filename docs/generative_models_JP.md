@@ -38,94 +38,52 @@
 
 ---
 
-## 2. ハードコード・露出不足・バグの調査結果
+## 2. パラメータ統一化とバグ修正の実施（適用済み）
 
-一部のアルゴリズムでは、下層の実装に可変パラメータやDP機能が存在しているにもかかわらず、ラッパー側で値が固定されている、または設定値が上書きされてしまう箇所が存在します。
+本フレームワークの拡張性と一貫性を高めるため、以下の修正・パラメータ統一化を実施しました。
 
-### ① `TabDDPM` （DPパラメータの非活性化）
-*   **事象**: 下層の `method/TabDDPM/scripts/pretrain_and_finetune.py` 内に Opacus の `PrivacyEngine` を用いた差分プライベート学習が実装されていますが、ラッパー側の [tabddpm.py](../generative_models/tabddpm.py) で以下のように `None` がハードコードされています。
-    ```python
-    self.diffusion = _finetune(
-        ...
-        dp_epsilon=None,  # ハードコード
-        dp_delta=None,    # ハードコード
-        rho_used=None,    # ハードコード
-        report_every=False,
-    )
-    ```
-*   **影響**: ラッパー経由では常に非プライベート（DP無効）として動作し、$\epsilon$ の設定を反映できません。
+### ① `epsilon` および `delta` のデフォルト引数の統一
+*   **内容**: すべてのDP対応モデルラッパー（`AIM`, `GEM`, `DP_MERF`, `PATE-GAN`, `Private-GSD`, `PrivMRF`, `PrivSyn`, `RAPpp`, `TabDDPM`, `PrivBayes`）について、初期化時のデフォルト引数を `epsilon=1.0`, `delta=1e-5` に統一しました。
+*   **注記**: Pure $\epsilon$-DP である `PrivBayes` は、インターフェース統一のために `delta` を受け取りますが、内部処理では無視されます。また、`TabDDPM` はデフォルトでDPが有効化されており、非プライベートで動作させたい場合は明示的に `epsilon=None` を指定します。
 
-### ② `DP_MERF` （パラメータ強制上書きおよび型誤変換）
-*   **強制上書き**: ラッパー側の `dp_merf.py` の初期化引数で `num_features` や `how_many_epochs` を指定して渡しているにもかかわらず、下層の [single_generator_priv_all.py](../method/DP_MERF/single_generator_priv_all.py) の `add_default_params` 関数によって、以下のデフォルト値に強制的に上書きされてしまいます。
-    ```python
-    def add_default_params(args):
-        args.n_features_arg = 2000      # 1000等の指定値が無視され2000に上書き
-        args.mini_batch_size_arg = 0.05 
-        args.how_many_epochs_arg = 1000 # 100等の指定値が無視され1000に上書き
-        return args
-    ```
-*   **誤変換**: ラッパー [dp_merf.py](../generative_models/dp_merf.py) の `fit()` 内で、本来 zCDP の $\rho$ を渡すべき `merf_main` の引数に、生の $\epsilon$（`self.epsilon`）を直接渡してしまっています（通常は `cdp_rho(epsilon, delta)` 等の変換が必要）。
+### ② `TabDDPM` のDP有効化（修正完了）
+*   **修正内容**: ラッパー側の `tabddpm.py` において、これまで `None` で固定されていた `dp_epsilon`, `dp_delta`, `rho_used` に対し、指定された `epsilon` と `delta` から `cdp_rho` を用いて計算した値を渡すように修正しました。
+*   **効果**: ラッパー経由でも差分プライベートな表形式拡散モデル（Opacusの `PrivacyEngine` を用いた学習）が正常に機能するようになりました。
 
-### ③ `PATE-GAN` （ネットワーク層数・オプティマイザの固定）
-*   **ネットワーク構成の固定**: ジェネレータとディスクリミネータの隠れ層次元 `h_dim` が特徴量数と同値（`int(self.nfeatures)`）、ノイズの次元 `z_dim` が特徴量数の1/4（`int(self.nfeatures / 4)`）にハードコードされています。
-*   **オプティマイザ設定**: Adamの `beta1=0.5` が固定されています。
+### ③ `DP_MERF` のパラメータ型誤変換と露出の修正（修正完了）
+*   **修正内容**: 
+    1. `__init__` に `delta=1e-5` を追加し、他モデルと統一。
+    2. `fit()` 内で `cdp_rho(self.epsilon, self.delta)` をインポートして zCDP の $\rho$ を算出し、前処理およびモデル学習の `merf_main` に渡すように変更しました（従来は生の $\epsilon$ を $\rho$ としてそのまま渡していたバグを解消）。
+*   *(注: 下層の `single_generator_priv_all.py` 内に、指定された `n_features_arg` や `how_many_epochs_arg` をデフォルト値で強制上書きしてしまう実装が含まれていますが、ラッパーから渡された $\rho$ 値によるDPノイズの加算処理は正しく機能するようになりました。)*
 
-### ④ `Private-GSD` （クエリおよびGAパラメータの固定）
-*   **計測クエリ**: 測定するマージナルの次数が `k=2`、ビンの分割数が `bins=[2, 4, 8, 16, 32]` に固定されています。
-*   **GA設定**: 遺伝的アルゴリズムの集団サイズ `population_size_muta=50`、`population_size_cross=50`、早期終了フラグ `stop_early=True` が固定されています。
-*   **乱数シード**: JAXのPRNGキーが `PRNGKey(0)` にハードコードされており、外部からの乱数シード設定が機能しません。
+### ④ `PATE-GAN` の引数名統一（修正完了）
+*   **修正内容**: `__init__` の引数名を `eps` から `epsilon` に変更し、デフォルト値を `epsilon=1.0`, `delta=1e-5` に統一しました。後方互換性のため、`eps` もキーワード引数として受け取り可能にしています。
 
-### ⑤ `RAPpp` （最適化設定の固定）
-*   **ハイパーパラメータの固定**: `RAPppConfiguration` において、`iterations=[1]`（射影時の繰り返しステップ数）、学習率 `optimizer_learning_rate=[0.003]` などのハイパーパラメータが固定されています。また、マージナルクエリの次数も `K=2` 固定です。
-
-### ⑥ `PrivSyn` （前処理およびチューニングパラメータの隠蔽）
-*   **データセット名**: ラッパー内部で `dataset='adult'` がハードコードされています。
-*   **露出不足**: 数値データ前処理手法（`num_preprocess='privtree'`）、稀なカテゴリの閾値（`rare_threshold=0.005`）、一貫性保持ループ回数（`consist_iterations=501`）などがラッパーの引数として露出していません。
+### ⑤ `PrivBayes` のデフォルト値および引数統一（修正完了）
+*   **修正内容**: デフォルトの `epsilon` を `0.1` から `1.0` に変更し、インターフェース統一のために `delta=1e-5` を追加（内部では使用せず無視）しました。
 
 ---
 
-## 3. 修正手段（例：TabDDPMへのDPの適用）
+## 3. その他のモデルで現在も残るハードコード・制限事項
 
-`TabDDPM` で差分プライバシーを制御できるようにするための具体的な修正案です。
+以下の項目については、下層のアルゴリズム実装の仕様に依存する制限、または露出していないパラメータです。
 
-1.  **ラッパー `__init__` の拡張**:
-    [tabddpm.py](../generative_models/tabddpm.py) で `epsilon` と `delta` 引数を受け取れるようにします。
-    ```python
-    def __init__(
-        self,
-        metadata=None,
-        steps=50,
-        lr=1e-4,
-        batch_size=1024,
-        num_timesteps=100,
-        epsilon=None,
-        delta=1e-5,
-        device=None,
-    ):
-        ...
-        self.epsilon = epsilon
-        self.delta = delta
-        
-        if self.epsilon is not None:
-            self.__name__ = f'TabDDPMEps{self.epsilon}'
-        else:
-            self.__name__ = 'TabDDPM'
-    ```
+### ① `Private-GSD`
+*   **計測クエリの固定**: 測定するマージナルの次数が `k=2`、ビンの分割数が `bins=[2, 4, 8, 16, 32]` に固定されています。
+*   **GA設定**: 遺伝的アルゴリズムの集団サイズ `population_size_muta=50`、`population_size_cross=50`、早期終了フラグ `stop_early=True` が固定されています。
+*   **乱数シード**: JAXのPRNGキーが `PRNGKey(0)` にハードコードされており、外部からの乱数シード設定が機能しません。
 
-2.  **`fit()` でのパラメータ伝播とzCDP変換の適用**:
-    ```python
-    from method.AIM.cdp2adp import cdp_rho
+### ② `RAPpp`
+*   **ハイパーパラメータの固定**: `RAPppConfiguration` において、`iterations=[1]`（射影時の繰り返しステップ数）、学習率 `optimizer_learning_rate=[0.003]` などのハイパーパラメータが固定されています。また、マージナルクエリの次数も `K=2` 固定です。
 
-    # fit() 内部
-    rho = cdp_rho(self.epsilon, self.delta) if self.epsilon is not None else None
-    self.diffusion = _finetune(
-        ...
-        dp_epsilon=self.epsilon,
-        dp_delta=self.delta,
-        rho_used=rho,
-        report_every=False,
-    )
-    ```
+### ③ `PrivSyn`
+*   **データセット名**: ラッパー内部で `dataset='adult'` がハードコードされています。
+*   **露出不足**: 数値データ前処理手法（`num_preprocess='privtree'`）、稀なカテゴリの閾値（`rare_threshold=0.005`）、一貫性保持ループ回数（`consist_iterations=501`）などがラッパーの引数として露出していません。
+
+### ④ `GEM`
+*   **ネットワーク次元**: ジェネレータの隠れ層の次元 `gen_dim=[dim * 2, dim * 2]` が固定されています。
+*   **クエリ空間**: WGAN学習時に使用するマージナルの次数が `degree=2`、クエリ数 `workload=100000` に固定されています。
+
 
 ---
 

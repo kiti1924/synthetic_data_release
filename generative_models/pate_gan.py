@@ -26,7 +26,7 @@ class PATEGAN(GenerativeModel):
     """ A generative adversarial network trained under the PATE framework to achieve differential privacy """
 
     def __init__(self, metadata,
-                 eps=1, delta=1e-5, infer_ranges=False,
+                 epsilon=1.0, delta=1e-5, eps=None, infer_ranges=False,
                  num_teachers=10, n_iters=100, batch_size=128,
                  learning_rate=1e-4, device=None, multiprocess=False):
         """
@@ -44,7 +44,9 @@ class PATEGAN(GenerativeModel):
         self.nfeatures = self.get_num_features()
 
         # Privacy params
-        self.epsilon = eps
+        if eps is not None:
+            epsilon = eps
+        self.epsilon = epsilon
         self.delta = delta
         self.infer_ranges = infer_ranges
         
@@ -107,7 +109,7 @@ class PATEGAN(GenerativeModel):
 
         self.trained = False
 
-        self.__name__ = f'PateGanEps{self.epsilon}'
+        self.__name__ = f'PateGanEps{self.epsilon}Delta{self.delta}'
 
     def _graph_ctx(self):
         """Return a context manager that activates self.graph when on CPU."""

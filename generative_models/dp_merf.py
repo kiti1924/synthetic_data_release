@@ -20,6 +20,7 @@ from preprocess_common.preprocess import discretizer, rare_merger
 from utils.constants import CATEGORICAL, ORDINAL, FLOAT, INTEGER
 from utils.logging import LOGGER
 from utils.device_utils import validate_and_get_device
+from method.AIM.cdp2adp import cdp_rho
 
 
 class _DP_MERFPreprocessor:
@@ -85,6 +86,7 @@ class DP_MERF(GenerativeModel):
         self,
         metadata=None,
         epsilon=1.0,
+        delta=1e-5,
         num_preprocess='privtree',
         rare_threshold=0.005,
         num_features=1000,
@@ -99,6 +101,7 @@ class DP_MERF(GenerativeModel):
         
         self.metadata = metadata
         self.epsilon = epsilon
+        self.delta = delta
         self.num_preprocess = num_preprocess
         self.rare_threshold = rare_threshold
         self.num_features = num_features
@@ -118,7 +121,7 @@ class DP_MERF(GenerativeModel):
         self._original_columns = []
         self._original_label_column = None
         self.trained = False
-        self.__name__ = f'DP_MERFEps{self.epsilon}'
+        self.__name__ = f'DP_MERFEps{self.epsilon}Delta{self.delta}'
 
     def fit(self, data):
         assert isinstance(data, self.datatype), (
@@ -128,7 +131,8 @@ class DP_MERF(GenerativeModel):
         LOGGER.debug(f'Start fitting {self.__class__.__name__} to data of shape {data.shape}...')
 
         X_num, X_cat, y = self._build_feature_arrays(data)
-        self.preprocessor = _DP_MERFPreprocessor(self.num_preprocess, self.rare_threshold, self.epsilon or 0.0)
+        rho = cdp_rho(self.epsilon, self.delta) if self.epsilon is not None else 0.0
+        self.preprocessor = _DP_MERFPreprocessor(self.num_preprocess, self.rare_threshold, rho)
         X_num, X_cat = self.preprocessor.fit_transform(X_num, X_cat)
 
         self._tmp_dir = tempfile.TemporaryDirectory()
@@ -155,7 +159,7 @@ class DP_MERF(GenerativeModel):
             args,
             {'X_num': X_num, 'X_cat': X_cat, 'y': y},
             domain,
-            self.epsilon if self.epsilon is not None else 0.0,
+            rho,
             parent_dir=self.parent_dir,
             seed_number=self.seed,
             is_priv_arg=self.epsilon is not None,

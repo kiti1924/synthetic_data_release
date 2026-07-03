@@ -18,6 +18,7 @@ from generative_models.generative_model import GenerativeModel
 from utils.constants import CATEGORICAL, FLOAT, INTEGER, ORDINAL
 from utils.logging import LOGGER
 from utils.device_utils import validate_and_get_device
+from method.AIM.cdp2adp import cdp_rho
 
 
 make_dataset_from_df = None
@@ -78,6 +79,8 @@ class TabDDPM(GenerativeModel):
         lr=1e-4,
         batch_size=1024,
         num_timesteps=100,
+        epsilon=1.0,
+        delta=1e-5,
         device=None,
     ):
         # Set device with device_utils
@@ -88,13 +91,19 @@ class TabDDPM(GenerativeModel):
         self.lr = lr
         self.batch_size = batch_size
         self.num_timesteps = num_timesteps
+        self.epsilon = epsilon
+        self.delta = delta
 
         self.datatype = DataFrame
         self.diffusion = None
         self.sampler = None
         self.dataset = None
         self.trained = False
-        self.__name__ = 'TabDDPM'
+        
+        if self.epsilon is not None:
+            self.__name__ = f'TabDDPMEps{self.epsilon}Delta{self.delta}'
+        else:
+            self.__name__ = 'TabDDPM'
 
         self._tmp_dir = None
         self._reverse_maps = {}
@@ -149,6 +158,7 @@ class TabDDPM(GenerativeModel):
         num_numerical_features = len(self._numeric_columns)
 
         self._tmp_dir = tempfile.TemporaryDirectory()
+        rho = cdp_rho(self.epsilon, self.delta) if self.epsilon is not None else None
         self.diffusion = _finetune(
             **config['train']['main'],
             **config['diffusion_params'],
@@ -160,9 +170,9 @@ class TabDDPM(GenerativeModel):
             T_dict=t_params,
             num_numerical_features=num_numerical_features,
             device=self.device,
-            dp_epsilon=None,
-            dp_delta=None,
-            rho_used=None,
+            dp_epsilon=self.epsilon,
+            dp_delta=self.delta,
+            rho_used=rho,
             report_every=False,
         )
         self.sampler = _ddpm_sampler(

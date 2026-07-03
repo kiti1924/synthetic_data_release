@@ -302,12 +302,13 @@ class PrivBayes(BayesianNet):
     """"
     A differentially private BayesianNet model using GreedyBayes
     """
-    def __init__(self, metadata, histogram_bins=10, degree=1, epsilon=.1, infer_ranges=False, multiprocess=True, seed=None):
+    def __init__(self, metadata, histogram_bins=10, degree=1, epsilon=1.0, delta=1e-5, infer_ranges=False, multiprocess=True, seed=None):
         super().__init__(metadata=metadata, histogram_bins=histogram_bins, degree=degree, infer_ranges=infer_ranges, multiprocess=multiprocess, seed=seed)
 
         self.epsilon = float(epsilon)
+        self.delta = delta # delta is accepted for unified API but unused in Pure DP (PrivBayes)
 
-        self.__name__ = f'PrivBayesEps{self.epsilon}'
+        self.__name__ = f'PrivBayesEps{self.epsilon}Delta{self.delta}'
 
     @property
     def laplace_noise_scale(self):

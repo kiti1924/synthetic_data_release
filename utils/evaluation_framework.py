@@ -128,9 +128,14 @@ class EvaluationEngine:
             model_config = task[1] if is_flattened else task[0]
             iter_idx = iter_idxs[i] if is_flattened else iter_idxs
             
-            config_str = str(model_config).encode('utf-8')
-            config_hash = hashlib.md5(config_str).hexdigest()[:8]
-            safe_name = str(model_config[0]).replace('/', '_').replace(' ', '_')
+            if "raw_eval" in desc_prefix:
+                safe_name = "Raw"
+                config_hash = "raw"
+            else:
+                config_str = str(model_config).encode('utf-8')
+                config_hash = hashlib.md5(config_str).hexdigest()[:8]
+                safe_name = str(model_config[0]).replace('/', '_').replace(' ', '_')
+                
             ds_hash = hashlib.md5(self.dname.encode('utf-8')).hexdigest()[:4]
             
             # Use 'none' if iter_idx is None

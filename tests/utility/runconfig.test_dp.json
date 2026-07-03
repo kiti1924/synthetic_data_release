@@ -1,0 +1,30 @@
+{
+  "nIter": 1,
+  "sizeRawT": 100,
+  "sizeSynT": 100,
+  "nSynT": 1,
+  "nTargets": 0,
+  "Targets": [],
+  "TestRecords": [],
+  "generativeModels": {
+    "PrivBayes": [
+      [10, 1, 1.0, 1e-5]
+    ],
+    "DP_MERF": [
+      [1.0, 1e-5, "privtree", 0.005, 100, 0.05, 2]
+    ],
+    "TabDDPM": [
+      [2, 1e-4, 256, 5, 1.0, 1e-5]
+    ]
+  },
+  "sanitisationTechniques": {},
+  "utilityTasks": {
+    "RandForestClass": [
+      ["RISK_MORTALITY"]
+    ]
+  },
+  "dataFilter": {
+    "train": "DISCHARGE in ['2013Q1']",
+    "test": "DISCHARGE in ['2014Q1']"
+  }
+}
