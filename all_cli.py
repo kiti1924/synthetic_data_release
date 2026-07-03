@@ -27,12 +27,28 @@ def main():
                            help='Number of parallel workers (default: CPU count)')
     argparser.add_argument('--device', type=str, default=None,
                            help='Device to use for models (e.g., "cpu", "cuda:0").')
+    argparser.add_argument('--use-mpi', action='store_true',
+                           help='Use MPI for distributing tasks across multiple nodes.')
                            
     args = argparser.parse_args()
     
     # We will simulate sys.argv for the underlying argparsers in EvaluationEngine
     import sys
     
+    # Set MPI environment if requested
+    rank = 0
+    if args.use_mpi:
+        os.environ['USE_MPI'] = '1'
+        try:
+            from mpi4py import MPI
+            rank = MPI.COMM_WORLD.Get_rank()
+        except (ImportError, RuntimeError):
+            pass
+
+    if rank > 0:
+        # Suppress non-critical logs on workers at this level
+        logging.getLogger().setLevel(logging.WARNING)
+
     def build_argv_for_task(runconfig_path):
         new_argv = [sys.argv[0]]
         if args.s3name:
@@ -47,6 +63,8 @@ def main():
             new_argv.extend(['--workers', str(args.workers)])
         if args.device is not None:
             new_argv.extend(['--device', args.device])
+        if args.use_mpi:
+            new_argv.extend(['--use-mpi'])
             
         return new_argv
 
@@ -105,8 +123,9 @@ def main():
     logging.info("✅ ALL EVALUATIONS COMPLETED")
     logging.info("====================================")
 
-    from utils.report_validation import check_report_key_consistency
-    check_report_key_consistency(args.outdir)
+    if rank == 0:
+        from utils.report_validation import check_report_key_consistency
+        check_report_key_consistency(args.outdir)
 
 
 def _clear_cuda():

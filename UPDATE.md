@@ -2,19 +2,61 @@
 
 This document highlights the major updates and improvements made to the framework compared to the original repository.
 
+## 0. Environment Setup
+
+For execution in supercomputer or cluster environments (e.g., Cray XD2000), use the provided `setup.sh` script to build the environment. This script ensures that `mpi4py` is correctly linked with the system's MPI libraries.
+
+```bash
+# 1. Run the setup script on the login node
+bash setup.sh
+
+# 2. Activate the virtual environment
+source .venv/bin/activate
+
+# 3. Submit your batch script (e.g., job.sh) to the job scheduler
+qsub job.sh
+```
+
 ## 1. MPI Support for Distributed Execution
 
 To handle large-scale datasets and numerous computationally expensive generative models, the framework now supports **distributed parallel execution using MPI (Message Passing Interface)** via `mpi4py`.
 
 ### Key Features
+- **Distributed Evaluation Engine**: A robust framework (`EvaluationEngine`) that coordinates task distribution.
+- **Hierarchical Parallelism**: Combines MPI for inter-node communication and `joblib` for intra-node core utilization.
+- **Task Flattening (Performance Optimized)**: Evaluation tasks are flattened across all iterations, allowing all nodes to work on all model/iteration pairs simultaneously, maximizing throughput on supercomputers.
+- **Dual-Mode Execution**:
+    - **MPI Mode**: Automatically activated when running with `mpirun`.
+    - **Local Mode**: Falls back to standard multi-processing on local machines, ensuring full backward compatibility.
+
+## Execution Patterns
 - **Multi-Node & Multi-Core Scaling**: Models and evaluation tasks can be distributed across a cluster of nodes, bypassing the single-machine limits of `joblib`.
-- **Dynamic Worker Allocation**: The framework automatically partitions tasks across available MPI ranks (SPMD model) while preserving specific serial execution requirements for GPU-bound algorithms to avoid CUDA out-of-memory errors.
+- **Hierarchical Parallelism (MPI + Joblib)**: Rank 0 dynamically distributes task chunks across MPI nodes. Within each node, tasks are further parallelized locally using `joblib` (with the `loky` backend) to efficiently share memory for large DataFrames, minimizing inter-process communication overhead.
+- **Unified CLI Rank Management**: A centralized `EvaluationEngine` handles all boilerplate execution. Rank 0 exclusively handles directory creation, logging, result aggregation, and data broadcasting (`bcast`), while worker ranks (`rank > 0`) bypass redundant I/O operations, ensuring clean logs and avoiding race conditions.
+- **Master-Worker Task Distribution**: The framework utilizes a Master-Worker architecture rather than a symmetric SPMD model. Rank 0 acts as the master, dynamically dispatching task chunks to worker nodes (ranks > 0) to balance the load, while preserving specific serial execution requirements for GPU-bound algorithms to avoid CUDA out-of-memory errors.
 - **Graceful Fallback**: If the MPI library (`libmpi.so`) is unavailable or fails to load, the framework automatically catches the `RuntimeError` and falls back to standard `joblib`-based multiprocessing.
 
 ### Usage
-Enable MPI by setting the `--use-mpi` flag in the CLI:
+
+Enable distributed execution by combining an MPI launcher (`mpirun`) for node-level distribution with the `--workers` (`-W`) flag for local core-level parallelization.
+
+**Example: Supercomputer / Cluster Execution**
+In a cluster environment (e.g., using PBS/Torque), you allocate nodes and set 1 MPI process per node (`mpiprocs=1`), then utilize all local cores using `--workers`:
+
 ```bash
-mpirun -np 4 uv run python all_cli.py -D data/adult --use-mpi
+# Example Job Script Resource Allocation (e.g., 10 nodes, 192 cores per node, 1 MPI rank per node)
+# #PBS -l select=10:ncpus=192:mem=740gb:mpiprocs=1
+
+# Execute the framework
+mpirun ./.venv/bin/python all_cli.py \
+    -D data/dataset_name \
+    -O outputs/dataset_name \
+    -RCU tests/utility/runconfig.json \
+    -RCL tests/linkage/runconfig.json \
+    -RCI tests/inference/runconfig.json \
+    -W 192 \
+    --device cpu \
+    --use-mpi
 ```
 
 ## 2. Robust Execution Caching

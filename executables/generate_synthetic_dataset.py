@@ -51,6 +51,14 @@ def main():
                            default=DEFAULT_SAMPLE_SIZE,
                            help='The size of the synthetic dataset')
     args = argparser.parse_args()
+    
+    # MPI safety: only rank 0 should run this script to avoid write collisions
+    try:
+        from mpi4py import MPI
+        if MPI.COMM_WORLD.Get_rank() > 0:
+            return
+    except (ImportError, RuntimeError):
+        pass
 
     # Load data
     if args.s3name:

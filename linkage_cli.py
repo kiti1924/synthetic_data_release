@@ -23,7 +23,9 @@ import pandas as pd
 from utils.utils import json_numpy_serialzer
 from utils.logging import LOGGER
 from utils.constants import *
-from utils.parallel import create_model, is_generative_model, is_generative_model_config
+from utils.parallel import (MODEL_REGISTRY, create_model,
+                           get_syn_data_cache_path, load_syn_data, save_syn_data,
+                           is_generative_model, is_generative_model_config)
 from utils.evaluation_framework import EvaluationEngine
 
 from feature_sets.independent_histograms import HistogramFeatureSet
@@ -89,61 +91,57 @@ def linkage_attack_worker(model_config, tid, target, rawA, metadata, runconfig):
         return (tid, model_config[0], {}, _deep_tuple(model_config))
 
 
-def linkage_eval_worker(model_config, rawTout, targets, targetIDs,
-                        attacks_for_model, metadata, runconfig):
-    """Evaluate one model across all targets for one game iteration."""
+def linkage_eval_worker(iter_idx, model_config, rawTout, targets, targetIDs,
+                        attacks_for_model, metadata, runconfig, dname, cache_dir):
+    """Evaluate one generative model's linkage risk across all targets.
+    :return: tuple: (iter_idx, model_name, results_target dict)
+    """
     try:
-        model = create_model(model_config, metadata)
-        model.set_seed(SEED)
-        model.multiprocess = False  # Pool ワーカー内では子プロセス生成不可
         nSynT = runconfig['nSynT']
         sizeSynT = runconfig['sizeSynT']
         per_target_results = {}
 
-        if is_generative_model(model):
+        # Check cache for synthetic data WITHOUT target
+        syn_cache_path = get_syn_data_cache_path(cache_dir, model_config, dname, iter_idx, nSynT, sizeSynT)
+        synTwithoutTarget = load_syn_data(syn_cache_path)
+
+        if synTwithoutTarget is None:
+            model = create_model(model_config, metadata)
+            model.set_seed(SEED)
             model.fit(rawTout)
             synTwithoutTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
-            synLabelsOut = [LABEL_OUT for _ in range(nSynT)]
+            save_syn_data(syn_cache_path, synTwithoutTarget)
 
-            for tid in targetIDs:
-                target = targets.loc[[tid]]
-                rawTin = pd.concat([rawTout, target])
-                model.fit(rawTin)
-                synTwithTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
-                synLabelsIn = [LABEL_IN for _ in range(nSynT)]
+        synLabelsOut = [LABEL_OUT for _ in range(nSynT)]
+        model_name = model_config[0]
 
-                synT = synTwithoutTarget + synTwithTarget
-                synTlabels = synLabelsOut + synLabelsIn
+        for tid in targetIDs:
+            target = targets.loc[[tid]]
+            rawTin = pd.concat([rawTout, target])
+            
+            # For "IN" data, we still need to train/generate unless we cache it too.
+            # But "with target" data is target-specific, so we usually don't cache it.
+            model = create_model(model_config, metadata)
+            model.set_seed(SEED)
+            model.fit(rawTin)
+            synTwithTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
+            synLabelsIn = [LABEL_IN for _ in range(nSynT)]
 
-                per_target_results[tid] = {}
-                for feature, Attack in attacks_for_model[tid].items():
-                    attackerGuesses = Attack.attack(synT)
-                    per_target_results[tid][feature] = {
-                        'Secret': synTlabels,
-                        'AttackerGuess': attackerGuesses
-                    }
-        else:
-            sanOut = model.sanitise(rawTout)
-            for tid in targetIDs:
-                target = targets.loc[[tid]]
-                rawTin = pd.concat([rawTout, target])
-                sanIn = model.sanitise(rawTin)
+            synT = synTwithoutTarget + synTwithTarget
+            synTlabels = synLabelsOut + synLabelsIn
 
-                sanT = [sanOut, sanIn]
-                sanTLabels = [LABEL_OUT, LABEL_IN]
+            per_target_results[tid] = {}
+            for feature, Attack in attacks_for_model[tid].items():
+                attackerGuesses = Attack.attack(synT)
+                per_target_results[tid][feature] = {
+                    'Secret': synTlabels,
+                    'AttackerGuess': attackerGuesses
+                }
 
-                per_target_results[tid] = {}
-                for feature, Attack in attacks_for_model[tid].items():
-                    attackerGuesses = Attack.attack(sanT, attemptLinkage=True, target=target)
-                    per_target_results[tid][feature] = {
-                        'Secret': sanTLabels,
-                        'AttackerGuess': attackerGuesses
-                    }
-
-        return (model.__name__, per_target_results)
+        return (iter_idx, model_name, per_target_results)
     except Exception as e:
         LOGGER.error(f"Linkage evaluation failed for model {model_config[0]}: {e}")
-        return (model_config[0], {})
+        return (iter_idx, model_config[0], {})
 
 
 def main():
@@ -154,6 +152,7 @@ def main():
     rawPop = engine.rawPop
     metadata = engine.metadata
     args = engine.args
+    dname = engine.dname
 
     ########################
     #### GAME INPUTS #######
@@ -179,7 +178,8 @@ def main():
     ###################################
     #### ATTACK TRAINING #############
     ##################################
-    print('\n---- Attack training ----')
+    if not engine.is_worker:
+        print('\n---- Attack training ----')
 
     attack_gm_tasks = [
         (cfg, tid, targets.loc[[tid]], rawA, metadata, runconfig)
@@ -210,36 +210,43 @@ def main():
     ##################################
     resultsTargetPrivacy = {tid: {} for tid in targetIDs}
 
+    all_rawTout = []
     for nr in range(runconfig['nIter']):
         rIdx = choice(list(rawPopDropTargets.index), size=runconfig['sizeRawT'], replace=False).tolist()
-        rawTout = rawPopDropTargets.loc[rIdx]
+        all_rawTout.append(rawPopDropTargets.loc[rIdx])
 
-        eval_gm_tasks = [
-            (cfg, rawTout, targets, targetIDs,
-             {tid: attacks[tid][cfg_to_model_name[_deep_tuple(cfg)]] for tid in targetIDs},
-             metadata, runconfig)
-            for cfg in engine.gm_configs
-        ]
-        eval_san_tasks = [
-            (cfg, rawTout, targets, targetIDs,
-             {tid: attacks[tid][cfg_to_model_name[_deep_tuple(cfg)]] for tid in targetIDs},
-             metadata, runconfig)
-            for cfg in engine.san_configs
-        ]
-        
-        eval_results = engine.run_parallel_evaluation(
-            eval_gm_worker=linkage_eval_worker,
-            san_tasks=eval_san_tasks,
-            gm_tasks=eval_gm_tasks,
-            iter_idx=nr,
-            desc_prefix="eval iter"
-        )
+    eval_gm_tasks = []
+    eval_gm_iter_idxs = []
+    eval_san_tasks = []
+    eval_san_iter_idxs = []
 
-        for model_name, per_target in eval_results:
-            for tid, feature_results in per_target.items():
-                if model_name not in resultsTargetPrivacy[tid]:
-                    resultsTargetPrivacy[tid][model_name] = {}
-                resultsTargetPrivacy[tid][model_name][nr] = feature_results
+    for nr in range(runconfig['nIter']):
+        rawTout = all_rawTout[nr]
+        for cfg in engine.gm_configs:
+            eval_gm_tasks.append((nr, cfg, rawTout, targets, targetIDs, 
+                                 {tid: attacks[tid][cfg_to_model_name[_deep_tuple(cfg)]] for tid in targetIDs},
+                                 metadata, runconfig, dname, engine.cache_dir))
+            eval_gm_iter_idxs.append(nr)
+        for cfg in engine.san_configs:
+            eval_san_tasks.append((nr, cfg, rawTout, targets, targetIDs,
+                                  {tid: attacks[tid][cfg_to_model_name[_deep_tuple(cfg)]] for tid in targetIDs},
+                                  metadata, runconfig))
+            eval_san_iter_idxs.append(nr)
+
+    eval_results = engine.run_parallel_evaluation(
+        eval_gm_worker=linkage_eval_worker,
+        san_tasks=eval_san_tasks,
+        gm_tasks=eval_gm_tasks,
+        san_iter_idxs=eval_san_iter_idxs,
+        gm_iter_idxs=eval_gm_iter_idxs,
+        desc_prefix="eval iter"
+    )
+
+    for nr, model_name, per_target in eval_results:
+        for tid, feature_results in per_target.items():
+            if model_name not in resultsTargetPrivacy[tid]:
+                resultsTargetPrivacy[tid][model_name] = {}
+            resultsTargetPrivacy[tid][model_name][nr] = feature_results
 
     engine.dump_results(resultsTargetPrivacy, prefix="ResultsMIA")
 

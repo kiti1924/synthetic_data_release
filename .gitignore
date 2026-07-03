@@ -42,5 +42,5 @@ debug_imports.txt
 log.txt
 
 # SPC/cache files
-test.sh
+*_test.sh
 cache

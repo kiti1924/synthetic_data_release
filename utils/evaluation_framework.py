@@ -74,8 +74,9 @@ class EvaluationEngine:
         # Load runconfig
         with open(path.join(cwd, self.args.runconfig)) as f:
             self.runconfig = json.load(f)
-        print('Runconfig:')
-        print(self.runconfig)
+        if not self.is_worker:
+            print('Runconfig:')
+            print(self.runconfig)
 
         # Load data
         if self.args.s3name is not None:
@@ -85,8 +86,9 @@ class EvaluationEngine:
             self.rawPop, self.metadata = load_local_data_as_df(path.join(cwd, self.args.datapath))
             self.dname = self.args.datapath.split('/')[-1]
 
-        print(f'Loaded data {self.dname}:')
-        print(self.rawPop.info())
+        if not self.is_worker:
+            print(f'Loaded data {self.dname}:')
+            print(self.rawPop.info())
 
         self.cache_dir = path.join(self.args.outdir, "cache")
         # Make sure outdir and cache_dir exist
@@ -117,44 +119,73 @@ class EvaluationEngine:
         self.gm_configs = [cfg for cfg in self.all_model_configs if is_generative_model_config(cfg)]
         self.san_configs = [cfg for cfg in self.all_model_configs if not is_generative_model_config(cfg)]
 
-    def _generate_cache_keys(self, tasks, iter_idx, desc_prefix):
+    def _generate_cache_keys(self, tasks, iter_idxs, desc_prefix):
         import hashlib
         keys = []
-        for task in tasks:
-            model_config = task[0]
+        is_flattened = isinstance(iter_idxs, list)
+        for i, task in enumerate(tasks):
+            # If flattened, iter_idx is task[0] and model_config is task[1]
+            model_config = task[1] if is_flattened else task[0]
+            iter_idx = iter_idxs[i] if is_flattened else iter_idxs
+            
             config_str = str(model_config).encode('utf-8')
             config_hash = hashlib.md5(config_str).hexdigest()[:8]
             safe_name = str(model_config[0]).replace('/', '_').replace(' ', '_')
             ds_hash = hashlib.md5(self.dname.encode('utf-8')).hexdigest()[:4]
-            key = f"{desc_prefix}_{safe_name}_{config_hash}_{ds_hash}_iter{iter_idx}.pkl"
+            
+            # Use 'none' if iter_idx is None
+            iter_suffix = f"iter{iter_idx}" if iter_idx is not None else "iterNone"
+            key = f"{desc_prefix}_{safe_name}_{config_hash}_{ds_hash}_{iter_suffix}.pkl"
             keys.append(key)
         return keys
 
-    def run_parallel_evaluation(self, eval_gm_worker, san_tasks, gm_tasks, eval_san_worker=None, iter_idx=None, desc_prefix="eval"):
+    def run_parallel_evaluation(self, eval_gm_worker, san_tasks, gm_tasks, eval_san_worker=None, 
+                                san_iter_idxs=None, gm_iter_idxs=None, iter_idx=None, desc_prefix="eval"):
         # Helper to execute worker distribution efficiently across GPU and CPU boundaries.
         all_results = []
         
         # Suffix handling
-        suffix = f" {iter_idx+1}/{self.runconfig['nIter']}" if iter_idx is not None else ""
+        # If iter_idx is provided (legacy or single-iter), use it. 
+        # Otherwise, if we have lists of iter_idxs, the desc should reflect that.
+        suffix = ""
+        if iter_idx is not None:
+            suffix = f" {iter_idx+1}/{self.runconfig.get('nIter', 1)}"
+        
         eval_san_worker = eval_san_worker or eval_gm_worker
         
         # 1. Evaluate sanitisers (CPU only, optimally parallel)
         if san_tasks:
             san_workers = get_optimal_workers_for_config(san_tasks[0][0], self.args.workers)
-            san_keys = self._generate_cache_keys(san_tasks, iter_idx, f"San_{desc_prefix}")
+            # Use san_iter_idxs if provided, otherwise fallback to single iter_idx
+            current_san_iters = san_iter_idxs if san_iter_idxs is not None else iter_idx
+            san_keys = self._generate_cache_keys(san_tasks, current_san_iters, f"San_{desc_prefix}")
             all_results.extend(run_parallel_models(
                 eval_san_worker, san_tasks, max_workers=san_workers,
                 desc=f"San {desc_prefix}{suffix}", cache_keys=san_keys, cache_dir=self.cache_dir))
                 
         if gm_tasks:
+            # Use gm_iter_idxs if provided, otherwise fallback to single iter_idx
+            current_gm_iters = gm_iter_idxs if gm_iter_idxs is not None else iter_idx
+
             if _gpu_device_requested():
                 # Separate GPU-requiring models from CPU-only models for optimal parallelization
-                gpu_gm_tasks = [t for t in gm_tasks if model_requires_gpu(t[0])]
-                cpu_gm_tasks = [t for t in gm_tasks if not model_requires_gpu(t[0])]
+                gpu_gm_tasks = []
+                gpu_gm_iters = []
+                cpu_gm_tasks = []
+                cpu_gm_iters = []
+                
+                for i, t in enumerate(gm_tasks):
+                    it = current_gm_iters[i] if isinstance(current_gm_iters, list) else current_gm_iters
+                    if model_requires_gpu(t[0]):
+                        gpu_gm_tasks.append(t)
+                        gpu_gm_iters.append(it)
+                    else:
+                        cpu_gm_tasks.append(t)
+                        cpu_gm_iters.append(it)
     
                 # GPU models must serialize unless managed internally or over sub-devices
                 if gpu_gm_tasks:
-                    gpu_keys = self._generate_cache_keys(gpu_gm_tasks, iter_idx, f"GPU_{desc_prefix}")
+                    gpu_keys = self._generate_cache_keys(gpu_gm_tasks, gpu_gm_iters, f"GPU_{desc_prefix}")
                     all_results.extend(run_parallel_models(
                         eval_gm_worker, gpu_gm_tasks, max_workers=1,
                         desc=f"GPU GM {desc_prefix}{suffix}", cache_keys=gpu_keys, cache_dir=self.cache_dir))
@@ -162,14 +193,14 @@ class EvaluationEngine:
                 # CPU-only models can parallelize
                 if cpu_gm_tasks:
                     cpu_workers = get_optimal_workers_for_config(cpu_gm_tasks[0][0], self.args.workers)
-                    cpu_keys = self._generate_cache_keys(cpu_gm_tasks, iter_idx, f"CPU_{desc_prefix}")
+                    cpu_keys = self._generate_cache_keys(cpu_gm_tasks, cpu_gm_iters, f"CPU_{desc_prefix}")
                     all_results.extend(run_parallel_models(
                         eval_gm_worker, cpu_gm_tasks, max_workers=cpu_workers,
                         desc=f"CPU GM {desc_prefix}{suffix}", cache_keys=cpu_keys, cache_dir=self.cache_dir))
             else:
                 # If CPU is used, all models can be parallelized based on worker count
                 cpu_workers = get_optimal_workers_for_config(gm_tasks[0][0], self.args.workers)
-                gm_keys = self._generate_cache_keys(gm_tasks, iter_idx, f"GM_{desc_prefix}")
+                gm_keys = self._generate_cache_keys(gm_tasks, current_gm_iters, f"GM_{desc_prefix}")
                 all_results.extend(run_parallel_models(
                     eval_gm_worker, gm_tasks, max_workers=cpu_workers,
                     desc=f"GM Models {desc_prefix}{suffix}", cache_keys=gm_keys, cache_dir=self.cache_dir))

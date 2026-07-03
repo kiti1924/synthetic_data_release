@@ -1,6 +1,7 @@
 """Parallel execution utilities for model evaluation"""
 import importlib
 import os
+import uuid
 import warnings
 from multiprocessing import cpu_count
 import joblib
@@ -132,28 +133,52 @@ def _gpu_device_requested():
 import pickle
 
 def _cached_worker_fn(worker_fn, task, cache_path):
-    if cache_path and os.path.exists(cache_path):
-        try:
-            with open(cache_path, 'rb') as f:
-                res = pickle.load(f)
-            LOGGER.info(f"Loaded cached result from {os.path.basename(cache_path)}")
-            return res
-        except Exception as e:
-            LOGGER.warning(f"Failed to load cache {cache_path}: {e}. Recomputing.")
+    import hashlib
+    import numpy as np
+    import random
     
-    res = worker_fn(*task)
+    # Derive deterministic seed from cache_path or task representation
+    seed_str = os.path.basename(cache_path) if cache_path else str(task)
+    task_seed = int(hashlib.md5(seed_str.encode('utf-8')).hexdigest(), 16) % (2**32)
     
-    if cache_path:
+    # Save global state to prevent side effects in sequential/main-process runs
+    np_state = np.random.get_state()
+    py_state = random.getstate()
+    
+    try:
+        np.random.seed(task_seed)
+        random.seed(task_seed)
         try:
-            # Atomic save to prevent corruption, using PID to avoid process collisions
-            tmp_path = f"{cache_path}.tmp.{os.getpid()}"
-            with open(tmp_path, 'wb') as f:
-                pickle.dump(res, f)
-            os.replace(tmp_path, cache_path)
-        except Exception as e:
-            LOGGER.warning(f"Failed to save cache {cache_path}: {e}")
-            
-    return res
+            import torch
+            torch.manual_seed(task_seed)
+        except ImportError:
+            pass
+
+        if cache_path and os.path.exists(cache_path):
+            try:
+                res = joblib.load(cache_path)
+                LOGGER.info(f"Loaded cached result from {os.path.basename(cache_path)}")
+                return res
+            except Exception as e:
+                LOGGER.warning(f"Failed to load cache {cache_path}: {e}. Recomputing.")
+        
+        res = worker_fn(*task)
+    
+        if cache_path:
+            try:
+                # Ensure cache directory exists
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                # Atomic save to prevent corruption, using UUID to avoid cross-node collisions
+                tmp_path = f"{cache_path}.tmp.{uuid.uuid4().hex}"
+                joblib.dump(res, tmp_path, compress=1)
+                os.replace(tmp_path, cache_path)
+            except Exception as e:
+                LOGGER.warning(f"Failed to save cache {cache_path}: {e}")
+                
+        return res
+    finally:
+        np.random.set_state(np_state)
+        random.setstate(py_state)
 
 def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache_keys=None, cache_dir=None):
     """Run tasks in parallel using multiprocessing.Pool with tqdm progress bar.
@@ -173,21 +198,10 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
     use_mpi = os.environ.get('USE_MPI', '0') == '1'
 
     if max_workers == 1 and not use_mpi:
-        import numpy as np
-        import random
-        # 逐次実行時（メインプロセス）にモデル内で乱数が消費・リセットされても、
-        # メインプロセスの乱数状態に影響を与えないように状態を退避・復元する。
-        # これによりキャッシュヒット時と通常実行時の後続の再現性を完全に一致させる。
-        np_state = np.random.get_state()
-        py_state = random.getstate()
-        try:
-            return [
-                _cached_worker_fn(worker_fn, task, os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None)
-                for i, task in tqdm(enumerate(tasks), total=len(tasks), desc=desc)
-            ]
-        finally:
-            np.random.set_state(np_state)
-            random.setstate(py_state)
+        return [
+            _cached_worker_fn(worker_fn, task, os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None)
+            for i, task in tqdm(enumerate(tasks), total=len(tasks), desc=desc)
+        ]
     if max_workers is None and not use_mpi:
         has_gpu_tasks = any(model_requires_gpu(task[0]) for task in tasks if task and isinstance(task[0], (tuple, list, str)))
         if _gpu_device_requested() and has_gpu_tasks:
@@ -197,10 +211,27 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
 
     try:
         from mpi4py import MPI
+        # Check if actually running in an MPI environment with more than 1 rank
         if MPI.COMM_WORLD.Get_size() > 1:
             use_mpi = True
+        else:
+            # size=1 but MPI is loaded, we can still use the MPI code path or fallback
+            pass
     except (ImportError, RuntimeError):
         use_mpi = False
+
+    # --- EXECUTION PATH VISUALIZATION ---
+    if use_mpi:
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+        if rank == 0:
+            LOGGER.info(f"🚀 [{desc}] MODE: MPI (Distributed across {size} nodes)")
+            LOGGER.info(f"   Strategy: Hierarchical Dynamic Queue (MPI Inter-node + Joblib Intra-node)")
+    else:
+        LOGGER.info(f"💻 [{desc}] MODE: Local Parallel (Joblib/LOKY)")
+        LOGGER.info(f"   Strategy: Multi-processing on {max_workers} cores")
 
     if use_mpi:
         from mpi4py import MPI
@@ -208,59 +239,136 @@ def run_parallel_models(worker_fn, tasks, max_workers=None, desc="Models", cache
         rank = comm.Get_rank()
         size = comm.Get_size()
 
-        # SPMD Model: Partition tasks among ranks
-        my_tasks = [task for i, task in enumerate(tasks) if i % size == rank]
-        my_cache_paths = [
-            os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None 
-            for i in range(len(tasks)) if i % size == rank
-        ]
-        
-        my_results = []
-        disable_tqdm = (rank != 0)
-        for task, c_path in tqdm(zip(my_tasks, my_cache_paths), total=len(my_tasks), desc=f"{desc}", disable=disable_tqdm):
-            my_results.append(_cached_worker_fn(worker_fn, task, c_path))
-            
-        LOGGER.info(f"Node (Rank {rank}) finished processing {len(my_tasks)} tasks.")
-            
-        # Scalable Gather: Each rank writes results to a temp file, Rank 0 reads and combines them
-        rank_file = os.path.join(cache_dir, f".tmp_results_rank_{rank}_{os.getpid()}.pkl")
-        with open(rank_file, 'wb') as f:
-            pickle.dump(my_results, f)
-            
-        comm.barrier()
-        
+        # Hierarchical Dynamic Queue (MPI + Joblib)
+        # Each rank processes tasks in parallel using joblib (intra-node)
+        # while MPI distributes work chunks across ranks (inter-node).
+        local_n_jobs = max_workers if max_workers is not None else 1
+
         if rank == 0:
-            # Reconstruct original results list order
             results = [None] * len(tasks)
-            # Gather all file paths from ranks via MPI string gather to support arbitrary PIDs
-            all_rank_files = comm.gather(rank_file, root=0)
+            next_task_idx = 0
+            active_workers = 0
             
-            for r, rf in enumerate(all_rank_files):
-                if rf and os.path.exists(rf):
-                    with open(rf, 'rb') as f:
-                        r_results = pickle.load(f)
+            # Use tqdm on Rank 0 to monitor progress
+            with tqdm(total=len(tasks), desc=desc) as pbar:
+                # Initial dispatch: send a chunk of tasks to each worker
+                for r in range(1, size):
+                    if next_task_idx < len(tasks):
+                        # Chunk size matches local worker count for efficiency
+                        chunk_size = min(local_n_jobs, len(tasks) - next_task_idx)
+                        chunk_indices = list(range(next_task_idx, next_task_idx + chunk_size))
+                        comm.send(chunk_indices, dest=r, tag=10)
+                        next_task_idx += chunk_size
+                        active_workers += 1
+                    else:
+                        comm.send(None, dest=r, tag=10)
+                
+                # If size=1, Rank 0 does all work locally using joblib
+                if size == 1:
+                    local_results = joblib.Parallel(n_jobs=local_n_jobs, backend='loky')(
+                        joblib.delayed(_cached_worker_fn)(
+                            worker_fn, tasks[i], 
+                            os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None
+                        ) for i in range(len(tasks))
+                    )
+                    pbar.update(len(tasks))
+                    return local_results
+
+                # Collect results and dispatch remaining chunks
+                while active_workers > 0:
+                    status = MPI.Status()
+                    result_bundle = comm.recv(source=MPI.ANY_SOURCE, tag=20, status=status)
+                    worker_rank = status.Get_source()
                     
-                    for i, res in enumerate(r_results):
-                        orig_idx = r + i * size
-                        if orig_idx < len(tasks):
-                            results[orig_idx] = res
+                    # result_bundle is a list of (idx, res) tuples
+                    for idx, res in result_bundle:
+                        results[idx] = res
+                        pbar.update(1)
                     
-                    try:
-                        os.remove(rf)
-                    except OSError:
-                        pass
+                    if next_task_idx < len(tasks):
+                        chunk_size = min(local_n_jobs, len(tasks) - next_task_idx)
+                        chunk_indices = list(range(next_task_idx, next_task_idx + chunk_size))
+                        comm.send(chunk_indices, dest=worker_rank, tag=10)
+                        next_task_idx += chunk_size
+                    else:
+                        comm.send(None, dest=worker_rank, tag=10)
+                        active_workers -= 1
+            
+            LOGGER.info(f"Master (Rank 0) finished collecting {len(tasks)} results.")
             return results
         else:
-            comm.gather(rank_file, root=0)
+            # Worker loop: process chunks using local multi-processing
+            while True:
+                task_indices = comm.recv(source=0, tag=10)
+                if task_indices is None:
+                    break
+                
+                # Execute chunk in parallel locally
+                # Loky backend is used for efficient memory sharing of DataFrames
+                chunk_results = joblib.Parallel(n_jobs=local_n_jobs, backend='loky')(
+                    joblib.delayed(lambda idx: (idx, _cached_worker_fn(
+                        worker_fn, tasks[idx], 
+                        os.path.join(cache_dir, cache_keys[idx]) if cache_keys and cache_dir else None
+                    )))(i) for i in task_indices
+                )
+                
+                # Send back the whole chunk of results
+                comm.send(chunk_results, dest=0, tag=20)
+            
+            LOGGER.info(f"Worker (Rank {rank}) finished all assigned chunks.")
             return []
 
     # Use joblib.Parallel instead of multiprocessing.Pool
     # Loky backend automatically uses memmapping for arrays > 1MB, solving the IPC bottleneck
     with tqdm(total=len(tasks), desc=desc) as pbar:
-        results = joblib.Parallel(n_jobs=max_workers, backend='loky')(
+        parallel = joblib.Parallel(n_jobs=max_workers, backend='loky', return_as='generator')
+        results = []
+        for res in parallel(
             joblib.delayed(_cached_worker_fn)(worker_fn, task, os.path.join(cache_dir, cache_keys[i]) if cache_keys and cache_dir else None) 
             for i, task in enumerate(tasks)
-        )
-        pbar.update(len(results))
+        ):
+            results.append(res)
+            pbar.update(1)
             
     return results
+
+
+def get_syn_data_cache_path(cache_dir, model_config, dname, iter_idx, nSynT, sizeSynT):
+    """Generate a unique path for cached synthetic data."""
+    import hashlib
+    if cache_dir is None:
+        return None
+    
+    config_str = str(model_config).encode('utf-8')
+    config_hash = hashlib.md5(config_str).hexdigest()[:8]
+    model_name = str(model_config[0]).replace('/', '_').replace(' ', '_')
+    
+    # Key includes model, dataset, iteration, and generation parameters
+    filename = f"syn_{model_name}_{config_hash}_{dname}_iter{iter_idx}_n{nSynT}_s{sizeSynT}.pkl"
+    return os.path.join(cache_dir, "syn_data", filename)
+
+
+def load_syn_data(cache_path):
+    """Load synthetic data list from cache if it exists."""
+    if cache_path and os.path.exists(cache_path):
+        try:
+            res = joblib.load(cache_path)
+            from utils.parallel import LOGGER
+            LOGGER.info(f"Loaded cached synthetic data from {os.path.basename(cache_path)}")
+            return res
+        except Exception as e:
+            LOGGER.warning(f"Failed to load syn data cache {cache_path}: {e}")
+    return None
+
+
+def save_syn_data(cache_path, syn_data_list):
+    """Save synthetic data list to cache atomically."""
+    if not cache_path:
+        return
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        tmp_path = f"{cache_path}.tmp.{uuid.uuid4().hex}"
+        joblib.dump(syn_data_list, tmp_path, compress=1)
+        os.replace(tmp_path, cache_path)
+    except Exception as e:
+        LOGGER.warning(f"Failed to save syn data cache {cache_path}: {e}")

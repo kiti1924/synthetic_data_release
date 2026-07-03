@@ -14,7 +14,8 @@ import pandas as pd
 from utils.utils import json_numpy_serialzer
 from utils.logging import LOGGER
 from sklearn.model_selection import train_test_split
-from utils.parallel import create_model, create_utility_task
+from utils.parallel import (MODEL_REGISTRY, create_model, create_utility_task,
+                           get_syn_data_cache_path, load_syn_data, save_syn_data)
 from utils.evaluation_framework import EvaluationEngine
 
 def _deep_tuple(obj):
@@ -32,27 +33,37 @@ cwd = path.dirname(__file__)
 SEED = 42
 
 
-def utility_eval_gm_worker(model_config, rawTout, targets, targetIDs,
-                           utility_task_configs, testRecords, testRecordIDs,
-                           rawTest, metadata, runconfig):
-    """Evaluate one generative model's utility across all targets.
-    :return: tuple: (model_name, results_target dict, results_agg dict)
+def utility_eval_gm_worker(iter_idx, model_config, rawTout, targets, targetIDs,
+                           utility_task_configs, testRecords, testRecordIDs, rawTest, 
+                           metadata, runconfig, dname, cache_dir):
+    """Evaluate one generative model across all utility tasks and iterations.
+    :return: tuple: (iter_idx, model_name, results_target dict, results_agg dict)
     """
     try:
-        model = create_model(model_config, metadata)
-        model.set_seed(SEED)
+        nSynT = runconfig['nSynT']
+        sizeSynT = runconfig['sizeSynT']
+        
+        # Check cache for synthetic data WITHOUT target
+        syn_cache_path = get_syn_data_cache_path(cache_dir, model_config, dname, iter_idx, nSynT, sizeSynT)
+        synTwithoutTarget = load_syn_data(syn_cache_path)
+
+        if synTwithoutTarget is None:
+            model = create_model(model_config, metadata)
+            model.set_seed(SEED)
+            model.fit(rawTout)
+            synTwithoutTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
+            save_syn_data(syn_cache_path, synTwithoutTarget)
+        
+        model_name = model_config[0] # Fallback name
+
         utility_tasks = [create_utility_task(cfg, metadata) for cfg in utility_task_configs]
         for ut in utility_tasks:
             ut.set_seed(SEED)
-        nSynT = runconfig['nSynT']
-        sizeSynT = runconfig['sizeSynT']
 
         results_target = {}
         results_agg = {}
 
-        model.fit(rawTout)
-        synTwithoutTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
-
+        # 1. Evaluate on synthetic data WITHOUT target
         for ut in utility_tasks:
             predErrorTargets = []
             predErrorAggr = []
@@ -72,9 +83,15 @@ def utility_eval_gm_worker(model_config, rawTout, targets, targetIDs,
                 }
                 results_agg.setdefault(ut.__name__, []).append(('OUT', mean(_arr_a), int(np.isnan(_arr_a).sum())))
 
+        # 2. Evaluate on synthetic data WITH target (for each target)
         for tid in targetIDs:
+            # We don't cache "with target" data as it's too specific and numerous
             target = targets.loc[[tid]]
             rawTin = pd.concat([rawTout, target])
+            
+            # We need the model instance to fit and generate
+            model = create_model(model_config, metadata)
+            model.set_seed(SEED)
             model.fit(rawTin)
             synTwithTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
 
@@ -97,17 +114,17 @@ def utility_eval_gm_worker(model_config, rawTout, targets, targetIDs,
                     }
                     results_agg.setdefault(ut.__name__, []).append((tid, mean(_arr_a), int(np.isnan(_arr_a).sum())))
 
-        return (model.__name__, results_target, results_agg)
+        return (iter_idx, model_name, results_target, results_agg)
     except Exception as e:
         LOGGER.error(f"Utility evaluation failed for model {model_config[0]}: {e}")
-        return (model_config[0], {}, {})
+        return (iter_idx, model_config[0], {}, {})
 
 
-def utility_eval_san_worker(model_config, rawTout, targets, targetIDs,
+def utility_eval_san_worker(iter_idx, model_config, rawTout, targets, targetIDs,
                             utility_task_configs, testRecords, testRecordIDs,
                             rawTest, metadata, runconfig):
     """Evaluate one sanitiser's utility across all targets.
-    :return: tuple: (model_name, results_target dict, results_agg dict)
+    :return: tuple: (iter_idx, model_name, results_target dict, results_agg dict)
     """
     try:
         model = create_model(model_config, metadata)
@@ -166,10 +183,75 @@ def utility_eval_san_worker(model_config, rawTout, targets, targetIDs,
                     }
                     results_agg.setdefault(ut.__name__, []).append((tid, mean(_arr_a), int(np.isnan(_arr_a).sum())))
 
-        return (model.__name__, results_target, results_agg)
+        return (iter_idx, model.__name__, results_target, results_agg)
     except Exception as e:
         LOGGER.error(f"Utility evaluation failed for sanitiser {model_config[0]}: {e}")
-        return (model_config[0], {}, {})
+        return (iter_idx, model_config[0], {}, {})
+
+
+def utility_eval_raw_worker(iter_idx, rawTout, targets, targetIDs,
+                            utility_task_configs, testRecords, testRecordIDs,
+                            rawTest, metadata, runconfig):
+    """Evaluate utility on raw data for one iteration.
+    :return: tuple: (iter_idx, results_target dict, results_agg dict)
+    """
+    try:
+        results_target = {} # { (ut_name, tid_or_out): result_dict }
+        results_agg = {}    # { ut_name: [ (tid_or_out, accuracy, failures) ] }
+
+        # 1. OUT evaluation
+        for ut_cfg in utility_task_configs:
+            ut = create_utility_task(ut_cfg, metadata)
+            ut.set_seed(SEED)
+            predErrorTargets = []
+            predErrorAggr = []
+            for _ in range(runconfig['nSynT']):
+                ut.train(rawTout)
+                predErrorTargets.append(ut.evaluate(testRecords))
+                predErrorAggr.append(ut.evaluate(rawTest))
+
+            _arr_t = np.array(predErrorTargets, dtype=float)
+            _arr_a = np.array(predErrorAggr, dtype=float)
+            _fail_t = int(np.isnan(_arr_t).all(axis=1).sum()) if _arr_t.ndim == 2 else int(np.isnan(_arr_t).sum())
+            _fail_a = int(np.isnan(_arr_a).sum())
+
+            results_target[(ut.__name__, 'OUT')] = {
+                'TestRecordID': testRecordIDs,
+                'Accuracy': list(mean(_arr_t, axis=0)),
+                'Failures': _fail_t
+            }
+            results_agg.setdefault(ut.__name__, []).append(('OUT', mean(_arr_a), _fail_a))
+
+        # 2. Per-target evaluation
+        for tid in targetIDs:
+            target = targets.loc[[tid]]
+            rawIn = pd.concat([rawTout, target])
+            for ut_cfg in utility_task_configs:
+                ut = create_utility_task(ut_cfg, metadata)
+                ut.set_seed(SEED)
+                predErrorTargets = []
+                predErrorAggr = []
+                for _ in range(runconfig['nSynT']):
+                    ut.train(rawIn)
+                    predErrorTargets.append(ut.evaluate(testRecords))
+                    predErrorAggr.append(ut.evaluate(rawTest))
+
+                _arr_t = np.array(predErrorTargets, dtype=float)
+                _arr_a = np.array(predErrorAggr, dtype=float)
+                _fail_t = int(np.isnan(_arr_t).all(axis=1).sum()) if _arr_t.ndim == 2 else int(np.isnan(_arr_t).sum())
+                _fail_a = int(np.isnan(_arr_a).sum())
+
+                results_target[(ut.__name__, tid)] = {
+                    'TestRecordID': testRecordIDs,
+                    'Accuracy': list(mean(_arr_t, axis=0)),
+                    'Failures': _fail_t
+                }
+                results_agg.setdefault(ut.__name__, []).append((tid, mean(_arr_a), _fail_a))
+
+        return (iter_idx, results_target, results_agg)
+    except Exception as e:
+        LOGGER.error(f"Raw utility evaluation failed for iteration {iter_idx}: {e}")
+        return (iter_idx, {}, {})
 
 
 def main():
@@ -245,114 +327,89 @@ def main():
     resultsTargetUtility = {ut_name: {'Raw': {}} for ut_name in ut_names}
     resultsAggUtility = {ut_name: {'Raw': {'TargetID': [], 'Accuracy': [], 'Failures': []}} for ut_name in ut_names}
 
+    all_rawTout = []
     for nr in range(runconfig['nIter']):
         rIdx = choice(list(rawTrainWoTargets.index), size=runconfig['sizeRawT'], replace=False).tolist()
-        rawTout = rawTrain.loc[rIdx]
+        all_rawTout.append(rawTrain.loc[rIdx])
 
-        ###############
-        ## RAW EVALUATION (keep serial - small computation)
-        ###############
-        if not engine.is_worker:
-            LOGGER.info('Start: Utility evaluation on Raw...')
+    ###############
+    ## PARALLEL RAW EVALUATION (Distributed via MPI)
+    ###############
+    raw_tasks = []
+    raw_iter_idxs = []
+    for nr in range(runconfig['nIter']):
+        raw_tasks.append((nr, all_rawTout[nr], targets, targetIDs,
+                         utility_task_configs, testRecords, testRecordIDs, rawTest, metadata, runconfig))
+        raw_iter_idxs.append(nr)
 
-            for ut_cfg in utility_task_configs:
-                ut = create_utility_task(ut_cfg, metadata)
-                ut.set_seed(SEED)
+    raw_results = engine.run_parallel_evaluation(
+        eval_gm_worker=utility_eval_raw_worker,
+        san_tasks=[],
+        gm_tasks=raw_tasks,
+        gm_iter_idxs=raw_iter_idxs,
+        desc_prefix="raw_eval"
+    )
 
-                resultsTargetUtility[ut.__name__]['Raw'][nr] = {}
-
-                predErrorTargets = []
-                predErrorAggr = []
-                for _ in range(runconfig['nSynT']):
-                    ut.train(rawTout)
-                    predErrorTargets.append(ut.evaluate(testRecords))
-                    predErrorAggr.append(ut.evaluate(rawTest))
-
-                _arr_targets = np.array(predErrorTargets, dtype=float)
-                _arr_aggr = np.array(predErrorAggr, dtype=float)
-                _failures_targets = int(np.isnan(_arr_targets).all(axis=1).sum()) if _arr_targets.ndim == 2 else int(np.isnan(_arr_targets).sum())
-                _failures_aggr = int(np.isnan(_arr_aggr).sum())
-                resultsTargetUtility[ut.__name__]['Raw'][nr]['OUT'] = {
-                    'TestRecordID': testRecordIDs,
-                    'Accuracy': list(mean(_arr_targets, axis=0)),
-                    'Failures': _failures_targets
-                }
-                resultsAggUtility[ut.__name__]['Raw']['TargetID'].append('OUT')
-                resultsAggUtility[ut.__name__]['Raw']['Accuracy'].append(mean(_arr_aggr))
-                resultsAggUtility[ut.__name__]['Raw']['Failures'].append(_failures_aggr)
-
-            for tid in targetIDs:
-                target = targets.loc[[tid]]
-                rawIn = pd.concat([rawTout, target])
-
-                for ut_cfg in utility_task_configs:
-                    ut = create_utility_task(ut_cfg, metadata)
-                    ut.set_seed(SEED)
-
-                    predErrorTargets = []
-                    predErrorAggr = []
-                    for _ in range(runconfig['nSynT']):
-                        ut.train(rawIn)
-                        predErrorTargets.append(ut.evaluate(testRecords))
-                        predErrorAggr.append(ut.evaluate(rawTest))
-
-                    _arr_targets = np.array(predErrorTargets, dtype=float)
-                    _arr_aggr = np.array(predErrorAggr, dtype=float)
-                    _failures_targets = int(np.isnan(_arr_targets).all(axis=1).sum()) if _arr_targets.ndim == 2 else int(np.isnan(_arr_targets).sum())
-                    _failures_aggr = int(np.isnan(_arr_aggr).sum())
-                    resultsTargetUtility[ut.__name__]['Raw'][nr][tid] = {
-                        'TestRecordID': testRecordIDs,
-                        'Accuracy': list(mean(_arr_targets, axis=0)),
-                        'Failures': _failures_targets
-                    }
-                    resultsAggUtility[ut.__name__]['Raw']['TargetID'].append(tid)
-                    resultsAggUtility[ut.__name__]['Raw']['Accuracy'].append(mean(_arr_aggr))
-                    resultsAggUtility[ut.__name__]['Raw']['Failures'].append(_failures_aggr)
-
-            LOGGER.info('Finished: Utility evaluation on Raw.')
-
-        ###############
-        ## PARALLEL MODEL EVALUATION
-        ###############
-        gm_tasks = [
-            (cfg, rawTout, targets, targetIDs,
-             utility_task_configs, testRecords, testRecordIDs, rawTest, metadata, runconfig)
-            for cfg in engine.gm_configs
-        ]
-        san_tasks = [
-            (cfg, rawTout, targets, targetIDs,
-             utility_task_configs, testRecords, testRecordIDs, rawTest, metadata, runconfig)
-            for cfg in engine.san_configs
-        ]
-
-        all_results = engine.run_parallel_evaluation(
-            eval_gm_worker=utility_eval_gm_worker,
-            eval_san_worker=utility_eval_san_worker,
-            san_tasks=san_tasks,
-            gm_tasks=gm_tasks,
-            iter_idx=nr,
-            desc_prefix="eval"
-        )
-
-        for model_name, results_target, results_agg in all_results:
+    if not engine.is_worker:
+        for nr, results_target, results_agg in raw_results:
             for (ut_name, tid_or_out), result_dict in results_target.items():
-                if ut_name not in resultsTargetUtility:
-                    resultsTargetUtility[ut_name] = {}
-                if model_name not in resultsTargetUtility[ut_name]:
-                    resultsTargetUtility[ut_name][model_name] = {}
-                if nr not in resultsTargetUtility[ut_name][model_name]:
-                    resultsTargetUtility[ut_name][model_name][nr] = {}
-                resultsTargetUtility[ut_name][model_name][nr][tid_or_out] = result_dict
-
+                resultsTargetUtility[ut_name]['Raw'][nr] = result_dict
+            
             for ut_name, entries in results_agg.items():
-                if ut_name not in resultsAggUtility:
-                    resultsAggUtility[ut_name] = {}
-                if model_name not in resultsAggUtility[ut_name]:
-                    resultsAggUtility[ut_name][model_name] = {'TargetID': [], 'Accuracy': [], 'Failures': []}
                 for tid_or_out, accuracy, failures in entries:
-                    resultsAggUtility[ut_name][model_name]['TargetID'].append(tid_or_out)
-                    resultsAggUtility[ut_name][model_name]['Accuracy'].append(accuracy)
-                    resultsAggUtility[ut_name][model_name]['Failures'].append(failures)
+                    resultsAggUtility[ut_name]['Raw']['TargetID'].append(tid_or_out)
+                    resultsAggUtility[ut_name]['Raw']['Accuracy'].append(accuracy)
+                    resultsAggUtility[ut_name]['Raw']['Failures'].append(failures)
+
+    ###############
+    ## PARALLEL MODEL EVALUATION (Flattened across iterations)
+    ###############
+    gm_tasks = []
+    gm_iter_idxs = []
+    san_tasks = []
+    san_iter_idxs = []
+
+    for nr in range(runconfig['nIter']):
+        rawTout = all_rawTout[nr]
+        for cfg in engine.gm_configs:
+            gm_tasks.append((nr, cfg, rawTout, targets, targetIDs,
+                            utility_task_configs, testRecords, testRecordIDs, rawTest, 
+                            metadata, runconfig, dname, engine.cache_dir))
+            gm_iter_idxs.append(nr)
+        for cfg in engine.san_configs:
+            san_tasks.append((nr, cfg, rawTout, targets, targetIDs,
+                             utility_task_configs, testRecords, testRecordIDs, rawTest, metadata, runconfig))
+            san_iter_idxs.append(nr)
+
+    all_results = engine.run_parallel_evaluation(
+        eval_gm_worker=utility_eval_gm_worker,
+        eval_san_worker=utility_eval_san_worker,
+        san_tasks=san_tasks,
+        gm_tasks=gm_tasks,
+        san_iter_idxs=san_iter_idxs,
+        gm_iter_idxs=gm_iter_idxs,
+        desc_prefix="eval"
+    )
+
+    for nr, model_name, results_target, results_agg in all_results:
+        for (ut_name, tid_or_out), result_dict in results_target.items():
+            if ut_name not in resultsTargetUtility:
+                resultsTargetUtility[ut_name] = {}
+            if model_name not in resultsTargetUtility[ut_name]:
+                resultsTargetUtility[ut_name][model_name] = {}
+            if nr not in resultsTargetUtility[ut_name][model_name]:
+                resultsTargetUtility[ut_name][model_name][nr] = {}
+            resultsTargetUtility[ut_name][model_name][nr][tid_or_out] = result_dict
+
+        for ut_name, entries in results_agg.items():
+            if ut_name not in resultsAggUtility:
+                resultsAggUtility[ut_name] = {}
+            if model_name not in resultsAggUtility[ut_name]:
+                resultsAggUtility[ut_name][model_name] = {'TargetID': [], 'Accuracy': [], 'Failures': []}
+            for tid_or_out, accuracy, failures in entries:
+                resultsAggUtility[ut_name][model_name]['TargetID'].append(tid_or_out)
+                resultsAggUtility[ut_name][model_name]['Accuracy'].append(accuracy)
+                resultsAggUtility[ut_name][model_name]['Failures'].append(failures)
 
     engine.dump_results(resultsTargetUtility, prefix="ResultsUtilTargets")
     engine.dump_results(resultsAggUtility, prefix="ResultsUtilAgg")
