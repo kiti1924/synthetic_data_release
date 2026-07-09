@@ -17,7 +17,7 @@ from utils.logging import LOGGER
 class PrivateGSD(GenerativeModel):
     """A wrapper for the Private-GSD synthetic data mechanism."""
 
-    def __init__(self, metadata=None, epsilon=1.0, delta=1e-5, epochs=100, batch_size=500):
+    def __init__(self, metadata=None, epsilon=1.0, delta=1e-9, epochs=100, batch_size=500):
         self.metadata = metadata
         self.epsilon = epsilon
         self.delta = delta

@@ -27,7 +27,7 @@ class DummyArgs:
 class RAPpp(GenerativeModel):
     """A wrapper for the RAP++ synthetic data mechanism."""
 
-    def __init__(self, metadata=None, epsilon=1.0, delta=1e-5):
+    def __init__(self, metadata=None, epsilon=1.0, delta=1e-9):
         self.metadata = metadata
         self.epsilon = epsilon
         self.delta = delta
@@ -59,8 +59,8 @@ class RAPpp(GenerativeModel):
                 from method.RAP.mechanisms.rap_pp import RAP_PP as RAPMechanism
                 from method.RAP.mechanisms.rap_pp import RAPppConfiguration
             except ImportError:
-                from method.RAP.mechanisms.rap_pp import RAPPlusPlus as RAPMechanism
-                from method.RAP.mechanisms.rap_pp import RAPppConfiguration
+                # Optional fallback or raise error
+                raise
 
         domain_dict = {col: len(self._reverse_maps[col]) for col in encoded_data.columns}
 
@@ -71,8 +71,8 @@ class RAPpp(GenerativeModel):
             )
 
         default_args = RAPppConfiguration(
-            iterations=[1],
-            sigmoid_doubles=[0],
+            iterations=[30],
+            sigmoid_doubles=[10],
             optimizer_learning_rate=[0.003],
             top_q=1,
             get_dp_select_epochs=lambda domain: len(domain.get_cat_cols()),

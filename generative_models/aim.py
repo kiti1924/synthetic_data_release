@@ -27,7 +27,7 @@ from method.AIM.mbi.torch_factor import Factor
 class AIM(GenerativeModel):
     """A wrapper for the AIM synthetic data mechanism."""
 
-    def __init__(self, metadata=None, epsilon=1.0, delta=1e-5, degree=2, 
+    def __init__(self, metadata=None, epsilon=1.0, delta=1e-9, degree=2, 
                  max_model_size=80, max_iters=1000, max_cells=10000, bounded=False, rounds=None, 
                  multiprocess=False, device=None,
     ):

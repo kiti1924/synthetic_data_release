@@ -80,7 +80,7 @@ class TabDDPM(GenerativeModel):
         batch_size=1024,
         num_timesteps=100,
         epsilon=1.0,
-        delta=1e-5,
+        delta=1e-9,
         device=None,
     ):
         # Set device with device_utils

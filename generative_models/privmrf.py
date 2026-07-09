@@ -34,7 +34,7 @@ class PrivMRF(GenerativeModel):
         self,
         metadata=None,
         epsilon=1.0,
-        delta=1e-5,
+        delta=1e-9,
         theta=6,
         max_measure_attr_num=6,
         estimation_iter_num=3000,

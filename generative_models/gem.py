@@ -24,7 +24,7 @@ from utils.device_utils import get_device, validate_and_get_device
 class GEM(GenerativeModel):
     """A wrapper for the GEM synthetic data mechanism."""
 
-    def __init__(self, metadata=None, epsilon=1.0, delta=1e-5, degree=2,
+    def __init__(self, metadata=None, epsilon=1.0, delta=1e-9, degree=2,
                  max_iters=500,
                  batch_size=500,
                  lr=1e-3, T=None, alpha=0.5,

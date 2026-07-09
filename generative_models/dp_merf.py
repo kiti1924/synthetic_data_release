@@ -86,7 +86,7 @@ class DP_MERF(GenerativeModel):
         self,
         metadata=None,
         epsilon=1.0,
-        delta=1e-5,
+        delta=1e-9,
         num_preprocess='privtree',
         rare_threshold=0.005,
         num_features=1000,

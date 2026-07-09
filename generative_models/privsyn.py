@@ -32,7 +32,7 @@ class _PrivSynPreprocessor:
 class PrivSyn(GenerativeModel):
     """A wrapper for the PrivSyn synthetic data mechanism."""
 
-    def __init__(self, metadata=None, epsilon=1.0, delta=1e-5, device=None):
+    def __init__(self, metadata=None, epsilon=1.0, delta=1e-9, device=None):
         self.metadata = metadata
         self.epsilon = epsilon
         self.delta = delta

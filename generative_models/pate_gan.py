@@ -26,7 +26,7 @@ class PATEGAN(GenerativeModel):
     """ A generative adversarial network trained under the PATE framework to achieve differential privacy """
 
     def __init__(self, metadata,
-                 epsilon=1.0, delta=1e-5, eps=None, infer_ranges=False,
+                 epsilon=1.0, delta=1e-9, eps=None, infer_ranges=False,
                  num_teachers=10, n_iters=100, batch_size=128,
                  learning_rate=1e-4, device=None, multiprocess=False):
         """
