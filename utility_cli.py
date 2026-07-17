@@ -48,11 +48,42 @@ def utility_eval_gm_worker(iter_idx, model_config, rawTout, targets, targetIDs,
         synTwithoutTarget = load_syn_data(syn_cache_path)
 
         if synTwithoutTarget is None:
+            import time
+            import psutil
+            import torch
+            
+            # Start profiling
+            process = psutil.Process(os.getpid())
+            mem_before = process.memory_info().rss / (1024 ** 2)
+            t_start = time.time()
+            
+            gpu_before = 0
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                gpu_before = torch.cuda.memory_allocated()
+                
             model = create_model(model_config, metadata)
             model.set_seed(SEED)
             model.fit(rawTout)
             synTwithoutTarget = [model.generate_samples(sizeSynT) for _ in range(nSynT)]
+            
+            t_end = time.time()
+            mem_after = process.memory_info().rss / (1024 ** 2)
+            elapsed = t_end - t_start
+            
+            gpu_peak = 0
+            if torch.cuda.is_available():
+                gpu_peak = torch.cuda.max_memory_allocated() - gpu_before
+                
+            LOGGER.info(
+                f"[RESOURCE_STATS] Model: {model_config[0]} | "
+                f"Training & Generation Time: {elapsed:.2f}s | "
+                f"RAM Delta: {mem_after - mem_before:.2f}MB (Before: {mem_before:.2f}MB, After: {mem_after:.2f}MB) | "
+                f"GPU Peak Delta: {gpu_peak / (1024 ** 2):.2f}MB"
+            )
             save_syn_data(syn_cache_path, synTwithoutTarget)
+        else:
+            LOGGER.info(f"[RESOURCE_STATS] Model: {model_config[0]} loaded from cache.")
         
         model_name = model_config[0] # Fallback name
 

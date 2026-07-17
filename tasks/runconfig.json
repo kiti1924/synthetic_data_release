@@ -10,11 +10,32 @@
     "PrivBayes": [
       [10, 1, 1.0, 1e-9]
     ],
+    "AIM": [
+      [1.0, 1e-9]
+    ],
+    "GEM": [
+      [1.0, 1e-9]
+    ],
+    "PrivateGSD": [
+      [1.0, 1e-9]
+    ],
+    "PrivMRF": [
+      [1.0, 1e-9]
+    ],
+    "PrivSyn": [
+      [1.0, 1e-9]
+    ],
+    "RAPpp": [
+      [1.0, 1e-9]
+    ],
     "DP_MERF": [
       [1.0, 1e-9, "privtree", 0.005, 50, 0.05, 2]
     ],
     "TabDDPM": [
       [2, 1e-4, 256, 5, 1.0, 1e-9]
+    ],
+    "PATEGAN": [
+      [1.0, 1e-9]
     ]
   },
   "sanitisationTechniques": {},
